@@ -1,0 +1,90 @@
+
+Create a CMakeLists.txt file to generate a project called "vibecode3". The project will be an LVGL test project. We want to build it in two stages. The project will use the RP Pico2_2, rp2350 cpu. FreeRtos path is located in current directories parent directory and is called "FreeRTOS-Kernel_real. The LVGL directoy is located in the parent directory and is called "lvgl"
+
+Create a "src" directory within the current directory. Add three files. The first file called "main.c" will contain the code that creates the FREERTOS threads that start two tasks. The First task is the "displayTimer" task which calls the LVGL timer  callback function. The second task is a task that accepts text from the USB port and directs it to the parse.
+
+Place the parser code into a file called "parser.c" Break the parser into two components, the first accepts text input from the USB and finds the first word of the text. It uses that word to find structure in an array of structures. The structure elements of the array contain the text to match the incoming word against, a help string, and a pointer to a function that takes two pramaters. The first pramater is the remainder of the text from the input line from USB, the second is a void* pointer. These functions will return a status of zero on success, and a non zero status on failure.
+
+Start the table with two functions. The first called "help" displays a simple help message, and itterates through the table displaying the help text of each function. The second function called "scale" instantiates a widget based on the code in the lvgl/examples/widgets/lv_example_scale_3.c.
+
+You will need to write interface code to interface to the st7789 LCD. The pin definitions that connect the PICO board to the display are found in the 'src/pindefs.h' file. Create a file called st7789.c / .h to write the interface code. In particular, write the following functions:
+
+lv_display_t * initialize_lvgl() -- calls lv_init, creates static buffers for the display output
+
+lv_display_t * disp, const lv_area_t * area, uint8_t * px_map) --- Transfers the contents of px_map to the display ouput. Use DMA for the transfer. Once the transfer is complete, call lv_display_flush_ready.
+
+
+
+
+
+
+
+
+create a subdirectory called "src" and move all the *.c, *.h files to src. Adjust the CMakeLists.txt so that the code continues to build. Within the src dirctory, Move the "usb_command_task" function to a file called "parser.c", create a file called parser.h, include parser.h into vibecode2.c, compile and test build the code. 
+
+Create a new structure within parser.c called Tokens. Tokens has the following format:
+
+struct s_tokens { 
+	const char * tokenText
+	const char * helpText;
+	uint8_t (*fn) (char * rest, void* v );
+};
+
+Create a static array of tokens such as:
+const struct s_tokens aTokens = {
+	{"blink", "Blink an LED", fnBlink },
+	{0}
+};
+
+creat a token function. Note that we will be creating many of these. An example is:
+
+fn_Blink ( char * rest, void * v ) {
+// printf ("In Blink Function"
+unsigned frequency;
+if (sscanf(buffer, "blink %lu", &frequency) == 1) {
+                        // Validate frequency (100ms to 5000ms)
+                        if (frequency >= 100 && frequency <= 5000) {
+                            if (xQueueSend(led_frequency_queue, &frequency, pdMS_TO_TICKS(100)) == pdPASS) {
+                                printf("LED frequency changed to %lu ms\n", frequency);
+                            } else {
+                                printf("Failed to send frequency command\n");
+                            }
+                        } else {
+                            printf("Invalid frequency: %lu ms. Must be between 100 and 5000 ms\n", frequency);
+                        }
+A
+                    }  
+	return 0;
+} 
+
+
+Create  a function called "parse". Parse extracts the first non whitespace characters from a line and comapres this list to each of the tokenText strings witin the array aTokens. If it finds a match, it calls the function identified as fn, passing the function the remainder of the string.
+
+Replace the code within usb_command_task that parses the command with the function parse.
+
+-----------------
+
+Please add FreeRTOS to the project. The FreeRTOS souce directory is in ../FreeRTOS-Kernel_real. Note that you are using the RP2350, and will need to import the FreeRTOS_Kernel_import.cmake from ../FreeRTos_Kernel_real/portable/ThirdParty/Community-Supported-Ports/GCC/RP2350_ARM_NTZ/FreeRTOS_Kernel_import.cmake
+
+Please define a binary semaphore (mutex) in main.c that will be used as a lock on LVGL. Define the following tasks with main.c. Expose thsi mutex globally  as g_LvglMutex.
+
+1) A timer task that perioducally updates lvgl. The timer task should function the same way as the periodic call to update the lvgl timer. Gard the call the the LVGL timer update with the mutex that was created previously. (g_lvglMutex). Perform any LVGL initialization before the timer loop in this task.
+
+2) A blinker task. Blink the LED once per interval. Create a variable called g_blinkRateMs that is initialized to 1000. This global variable is the tmeout in milisecods for the blink rate.
+
+3) Create a task parser task. This task should be modeled on the parser found in ../vibecode2/src/parser,c, ../vibecode/src/parser.h. Include a help function, and a function that sets the blink rate (g_blinkRateMs) If no arguments to the function are given, then return the current value of the blink rate to the user, If the user has input a number, parse the number and update g_blinkRateMs. Create a function called "startClock" "stopClock" and "setTime"
+
+4) Create a new file called "widgets.c", and move the code  that draws the widget from  lines 8 to lines 151 in main to widgets.c. Add code to widgets that creates and displays the widget just moved, as well as code that removes the widget and clears the screen. Update the "startClock" and "stopClock" in the parser to call the crate and remove widget code. Wrap the crate and remove calls with the g_lvlgMutex created earler.
+
+5) Compile, link and start the debugger on the code.
+
+
+
+I have a MEMS microphone, which is an ATSAMD21 that I want to integrate into this project. The clock line is hooked up to GP6, the incoming data line is hooked up to GP7. Filtering routines that translate PDM to PCM are available in ../rnnoise-examples-for-pico-2/lib/microphone-library-for-pico/src/OpenPDM2PCM
+an example on how to use this library are found in ../rnnoise-examples-for-pico-2/lib/microphone-library-for-pico/src/pdm_microphone.c and pdm_microphone.pio. Please find the filter files, and implemet a task that receives PDM input from the microphone, translates it to PCM, and puts the results into a ping-pong pair of buffres. Use PIO and DMA to transfer data from the microphone. We will want another task to block while waiting for the buffers to fill. Use a binary semaphore to indicate when a buffer is available for reading. A consumer task will wait on this semaphore, read a variable called "g_audioReady" which has the value 0, -- no audio ready, 1 -- audio ready in buffer 1, and 2 autio ready in buffer2. Buffer1 aqnd Buffer2 should each be 1024 short int16_t types.
+
+
+
+Would it be more efficient to use the DMA function reverse bytes and read output from the PIO directly into the OpenPDM2PCM input data buffer. Would this eliminate the convert_dma_to_pdm bytes function call?
+
+Woudl it make sense to have two DMA buffers and two DMA streams set up so that the DMA strams are chained together. When one stream completes, it starts the second DMA stream, and signals the 

@@ -1,0 +1,36 @@
+.program gpio_toggle_test
+
+.wrap_target
+    set pins, 0     ; GPIO low
+    nop [31]        ; Delay ~32 cycles
+    set pins, 1     ; GPIO high
+    nop [31]        ; Delay ~32 cycles
+.wrap
+
+% c-sdk {
+
+static inline void gpio_toggle_test_program_init(PIO pio, uint sm, uint offset, uint gpio) {
+    pio_sm_config c = gpio_toggle_test_program_get_default_config(offset);
+    
+    // Configure GPIO as output
+    sm_config_set_set_pins(&c, gpio, 1);
+    pio_gpio_init(pio, gpio);
+    pio_sm_set_consecutive_pindirs(pio, sm, gpio, 1, true);
+    
+    // Clock configuration for 150 MHz system clock
+    // Each loop: 2 * (nop[31] + set) = 2 * 33 = 66 cycles
+    // With clkdiv=1: 150 MHz / 66 ≈ 2.27 MHz toggle frequency
+    // With clkdiv=2.27: 150 MHz / 2.27 / 66 ≈ 1.0 MHz toggle frequency
+    // 
+    // Adjust clkdiv for different target frequencies:
+    // - clkdiv = 1.0   → ~2.27 MHz
+    // - clkdiv = 2.27  → ~1.0 MHz
+    // - clkdiv = 4.54  → ~0.5 MHz
+    sm_config_set_clkdiv(&c, 1.0);  // Set to desired divider
+    
+    pio_sm_init(pio, sm, offset, &c);
+}
+
+%}
+
+
