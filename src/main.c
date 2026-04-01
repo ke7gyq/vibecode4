@@ -12,6 +12,7 @@
 #include "widgets.h"
 #include "microphone.h"
 #include "audio_consumer.h"
+#include "network.h"
 // #include "pico/cyw43_arch.h"
 
 
@@ -151,7 +152,7 @@ static void timer_task(void *parameters)
 static void blinker_task(void *parameters)
 {
     printf("Blinker Task Started\n");
-    status_led_init();
+    // status_led_init();
     int state = false;
     while(1){
         status_led_set_state(state);
@@ -213,9 +214,8 @@ static void parser_task(void *parameters)
     }
 }
 
-/**
- * Main function - initializes hardware and starts FreeRTOS
- */
+
+
 int main(void)
 {
     // Initialize UART first before any printf calls
@@ -224,6 +224,8 @@ int main(void)
     printf("Vibecode4 - FreeRTOS with LVGL\n");
     printf("Initializing FreeRTOS...\n");
     
+    wifi_init();
+
     // **CRITICAL**: PDM microphone GPIO handled by PIO (SM2)
     // GPIO6: Data input (from microphone) - configured by pdm_clock_program_init()
     // GPIO7: Clock output (to microphone) - configured by pdm_clock_program_init()
@@ -311,7 +313,22 @@ int main(void)
     audio_consumer_init();
     #endif
 
-
+    #if(1)
+    // Network task - WiFi scanning and connection
+    result = xTaskCreate(
+        network_task,         // Task function
+        "NetworkTask",        // Task name
+        8192,
+        // 2048,                 // Stack size in words
+        NULL,                 // Parameters
+        2,                    // Priority (between timer/blinker and low tasks)
+        NULL                  // Task handle (not needed)
+    );
+    if (result != pdPASS) {
+        printf("Failed to create network task\n");
+        return 1;
+    }
+    #endif
     printf("Starting FreeRTOS scheduler...\n");
     vTaskStartScheduler();
     

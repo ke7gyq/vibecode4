@@ -4,8 +4,11 @@
 #include <ctype.h>
 #include "FreeRTOS.h"
 #include "semphr.h"
+#include "task.h"
 #include "parser.h"
 #include "widgets.h"
+#include "network.h"
+#include "tcp_server.h"
 
 /* External globals */
 extern SemaphoreHandle_t g_LvglMutex;
@@ -45,24 +48,8 @@ static uint8_t fnMicDebug(char *rest, void *v) {
     return 0;
 }
 
-/**
- * Token function for the "help" command
- * Displays help information for available commands
- * 
- * @param rest Remainder of the command string (unused)
- * @param v Void pointer for context (unused in this function)
- * @return 0 on success
- */
-static uint8_t fnHelp(char *rest, void *v) {
-    printf("\nAvailable commands:\n");
-    printf("  blink [ms]     - Get/set LED blink duration (no args shows current value)\n");
-    printf("  micDebug [val] - Get/set microphone debug level (0=off, 2+=on)\n");
-    printf("  startClock     - Start and display clock widget\n");
-    printf("  stopClock      - Stop and remove clock widget\n");
-    printf("  setTime <val>  - Set clock needle value (0-59)\n");
-    printf("  help           - Display this help message\n\n");
-    return 0;
-}
+/* Forward declaration of fnHelp - implemented after aTokens definition */
+static uint8_t fnHelp(char *rest, void *v);
 
 /**
  * Token function for the "blink" command
@@ -173,18 +160,298 @@ static uint8_t fnSetTime(char *rest, void *v) {
 }
 
 /**
+ * Token function for the "scanWifi" command
+ * Initiates a WiFi network scan
+ * 
+ * @param rest Remainder of the command string (unused)
+ * @param v Void pointer for context (unused)
+ * @return 0 on success, non-zero on failure
+ */
+static uint8_t fnScanWifi(char *rest, void *v) {
+    (void)rest;
+    (void)v;
+    printf("Starting WiFi scan...\n");
+    network_scan_start();
+    return 0;
+}
+
+/**
+ * Token function for the "wifiList" command
+ * Prints the results of the last WiFi scan
+ * 
+ * @param rest Remainder of the command string (unused)
+ * @param v Void pointer for context (unused)
+ * @return 0 on success, non-zero on failure
+ */
+static uint8_t fnWifiList(char *rest, void *v) {
+    (void)rest;
+    (void)v;
+    
+    if (network_scan_is_active()) {
+        printf("WiFi scan in progress...\n");
+        return 0;
+    }
+    
+    network_scan_print_results();
+    return 0;
+}
+
+/**
+ * Token function for the "wifiConnect" command
+ * Attempts to connect to a WiFi network
+ * 
+ * Usage: wifiConnect SSID password
+ * 
+ * @param rest Remainder of the command string containing SSID and password
+ * @param v Void pointer for context (unused)
+ * @return 0 on success, non-zero on failure
+ */
+static uint8_t fnWifiConnect(char *rest, void *v) {
+    (void)v;
+    
+    if (rest == NULL || *rest == '\0') {
+        printf("Usage: wifiConnect <SSID> <password>\n");
+        return 1;
+    }
+    
+    // Parse SSID and password
+    char ssid[33] = {0};
+    char password[64] = {0};
+    
+    // Extract SSID (up to first space)
+    char *space = strchr(rest, ' ');
+    if (space == NULL) {
+        printf("Usage: wifiConnect <SSID> <password>\n");
+        return 1;
+    }
+    
+    int ssid_len = space - rest;
+    if (ssid_len > 32) ssid_len = 32;
+    strncpy(ssid, rest, ssid_len);
+    ssid[ssid_len] = '\0';
+    
+    // Extract password (after space)
+    space++;  // Skip space
+    while (*space == ' ') space++;  // Skip additional spaces
+    strncpy(password, space, sizeof(password) - 1);
+    password[sizeof(password) - 1] = '\0';
+    
+    // Trim trailing whitespace from password
+    int pwd_len = strlen(password);
+    while (pwd_len > 0 && (password[pwd_len-1] == ' ' || password[pwd_len-1] == '\n' || password[pwd_len-1] == '\r')) {
+        password[--pwd_len] = '\0';
+    }
+    
+    if (strlen(password) == 0) {
+        printf("Usage: wifiConnect <SSID> <password>\n");
+        return 1;
+    }
+    
+    printf("Connecting to WiFi: %s\n", ssid);
+    int result = network_connect(ssid, password);
+    
+    if (result == 0) {
+        printf("Connection initiated. Check status with: wifiStatus\n");
+    } else {
+        printf("Failed to initiate connection (error code: %d)\n", result);
+    }
+    
+    return (result == 0) ? 0 : 1;
+}
+
+/**
+ * Token function for the "wifiStatus" command
+ * Checks WiFi connection status
+ * 
+ * @param rest Remainder of the command string (unused)
+ * @param v Void pointer for context (unused)
+ * @return 0 on success, non-zero on failure
+ */
+static uint8_t fnWifiStatus(char *rest, void *v) {
+    (void)rest;
+    (void)v;
+    
+    int status = network_is_connected();
+    if (status == 1) {
+        printf("WiFi Status: CONNECTED\n");
+    } else if (status == 0) {
+        printf("WiFi Status: NOT CONNECTED\n");
+    } else {
+        printf("WiFi Status: ERROR (%d)\n", status);
+    }
+    
+    return 0;
+}
+
+/**
+ * Token function for the "rtosStatus" command
+ * Displays stack usage information for all running FreeRTOS tasks
+ * 
+ * @param rest Remainder of the command string (unused)
+ * @param v Void pointer for context (unused)
+ * @return 0 on success, non-zero on failure
+ */
+static uint8_t fnRtosStatus(char *rest, void *v) {
+    (void)rest;
+    (void)v;
+    
+    printf("\n=== FreeRTOS Task Status ===\n");
+    printf("System Tick Count: %u\n\n", xTaskGetTickCount());
+    
+    // Get number of tasks
+    UBaseType_t task_count = uxTaskGetNumberOfTasks();
+    if (task_count == 0) {
+        printf("No tasks found\n\n");
+        return 0;
+    }
+    
+    // Allocate array for task status structures
+    TaskStatus_t *task_status_array = (TaskStatus_t *)malloc(task_count * sizeof(TaskStatus_t));
+    if (task_status_array == NULL) {
+        printf("ERROR: Failed to allocate memory for task status array\n");
+        return 1;
+    }
+    
+    // Get task information from kernel
+    // The total runtime is returned only if configGENERATE_RUN_TIME_STATS is enabled
+    uint32_t total_runtime = 0;
+    UBaseType_t num_tasks = uxTaskGetSystemState(task_status_array, task_count, &total_runtime);
+    
+    // Print header
+    printf("Task Name               State       HWM (words)  Priority  Ticks\n");
+    printf("---------------------------------------------------------------------\n");
+    
+    // Iterate through each task and print information
+    for (UBaseType_t i = 0; i < num_tasks; i++) {
+        TaskStatus_t *task = &task_status_array[i];
+        
+        // Convert state to string
+        const char *state_str = "Unknown";
+        switch (task->eCurrentState) {
+            case eRunning:
+                state_str = "Running";
+                break;
+            case eReady:
+                state_str = "Ready";
+                break;
+            case eBlocked:
+                state_str = "Blocked";
+                break;
+            case eSuspended:
+                state_str = "Suspended";
+                break;
+            case eDeleted:
+                state_str = "Deleted";
+                break;
+            case eInvalid:
+            default:
+                state_str = "Invalid";
+                break;
+        }
+        
+        // Print task information in columns
+        printf("%-23s %-11s %11u  %8u  %5u\n",
+               task->pcTaskName ? task->pcTaskName : "Unknown",
+               state_str,
+               task->usStackHighWaterMark,
+               (unsigned)task->uxCurrentPriority,
+               (unsigned)task->ulRunTimeCounter);
+    }
+    
+    printf("\n");
+    printf("Total tasks: %u\n", num_tasks);
+    printf("Stack HWM in words. Multiply by %zu for bytes.\n", sizeof(StackType_t));
+    printf("\n");
+    
+    free(task_status_array);
+    return 0;
+}
+
+/**
+ * Token function for the "tcpStart" command
+ * Starts the TCP server (sends "Hello X" to telnet clients on port 5000)
+ */
+static uint8_t fnTcpStart(char *rest, void *v) {
+    (void)rest;
+    (void)v;
+    
+    if (tcp_server_is_running()) {
+        printf("TCP Server: Already running\n");
+        return 0;
+    }
+    
+    int result = tcp_server_start();
+    if (result == 0) {
+        printf("TCP Server: Started (connect via: telnet <IP> 5000)\n");
+    } else {
+        printf("TCP Server: Failed to start\n");
+    }
+    return result;
+}
+
+/**
+ * Token function for the "tcpStop" command
+ * Stops the TCP server
+ */
+static uint8_t fnTcpStop(char *rest, void *v) {
+    (void)rest;
+    (void)v;
+    
+    if (!tcp_server_is_running()) {
+        printf("TCP Server: Not running\n");
+        return 0;
+    }
+    
+    tcp_server_stop();
+    printf("TCP Server: Stopped\n");
+    return 0;
+}
+
+/**
  * Static array of available tokens
  * Terminated with a null entry to mark the end of the array
  */
 static const struct s_tokens aTokens[] = {
-    {"help",       "Display available commands",           fnHelp},
-    {"blink",      "Get/set LED blink rate (ms)",          fnBlink},
-    {"micDebug",   "Get/set microphone debug level",       fnMicDebug},
-    {"startClock", "Start and display clock widget",       fnStartClock},
-    {"stopClock",  "Stop and remove clock widget",         fnStopClock},
-    {"setTime",    "Set clock needle value (0-59)",        fnSetTime},
-    {NULL,         NULL,                                    NULL}
+    {"help",        "Display available commands",           fnHelp},
+    {"blink",       "Get/set LED blink rate (ms)",          fnBlink},
+    {"micDebug",    "Get/set microphone debug level",       fnMicDebug},
+    {"startClock",  "Start and display clock widget",       fnStartClock},
+    {"stopClock",   "Stop and remove clock widget",         fnStopClock},
+    {"setTime",     "Set clock needle value (0-59)",        fnSetTime},
+    {"scanWifi",    "Start WiFi network scan",              fnScanWifi},
+    {"wifiList",    "List WiFi scan results",               fnWifiList},
+    {"wifiConnect", "Connect to WiFi (usage: wifiConnect SSID pass)", fnWifiConnect},
+    {"wifiStatus",  "Check WiFi connection status",         fnWifiStatus},
+    {"rtosStatus",  "Display FreeRTOS task stack usage",    fnRtosStatus},
+    {"tcpStart",    "Start TCP server (telnet port 5000)",  fnTcpStart},
+    {"tcpStop",     "Stop TCP server",                      fnTcpStop},
+    {NULL,          NULL,                                    NULL}
 };
+
+/**
+ * Token function for the "help" command
+ * Displays help information by iterating over aTokens array
+ * 
+ * @param rest Remainder of the command string (unused)
+ * @param v Void pointer for context (unused in this function)
+ * @return 0 on success
+ */
+static uint8_t fnHelp(char *rest, void *v) {
+    (void)rest;  /* Unused */
+    (void)v;     /* Unused */
+    
+    printf("\n");
+    printf("%-16s %s\n", "Token", "Function");
+    printf("%-16s %s\n", "-----", "--------");
+    
+    /* Iterate over aTokens array until NULL terminator */
+    for (int i = 0; aTokens[i].tokenText != NULL; i++) {
+        printf("%-16s %s\n", aTokens[i].tokenText, aTokens[i].helpText);
+    }
+    
+    printf("\n");
+    return 0;
+}
 
 /**
  * Parse a command string and execute the corresponding token function

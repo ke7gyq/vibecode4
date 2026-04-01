@@ -96,3 +96,15 @@ It appears that the filter output is 48 samples. Lets make the ping-pong output 
 Finally once an output buffer is filled, start filling the second, give the semaphore and notify other tasks that data is available as we are currently doing.
 
 
+Create a new pair of files called network.cpp, network.h. Within network.cpp, add the funcion startNetwork  to initialize a new FreeRtos task called network. Give it a priority slightly higher than other tasks within code. Use the code at  ~/rpi-pico/RPIPicoWExp-Mongoose/exp/WifiScanner/src/ as a template and copy the scanner class into the network.h file, and the corresponding files from Scanner.cpp into network.cpp. Remove functions getJson from both network.cpp and network.h. Update main.c to call startNetwork. Add a member function called printAP to both both the Scanner class and the network code. Make the function printAP virtual. The member functon, when called will use printf to print the elements of the xResults table. Print a header along with the results.
+
+Add two functions to parser.c, one function is called scanAp, the other function is called printAp.
+
+Modify the CMakeLists.txt file, and build the resulting code.
+
+
+please add the following file to vibecode4. secretes.h. Include secretes.h in network.cpp. Addd secretes.h to the .gitignore file. Within secretes.h define the following variables: 
+
+WIFI_SSID "foo"
+WIFI_PASSED "kita_is_my_dog"
+

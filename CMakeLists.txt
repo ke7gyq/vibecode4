@@ -67,6 +67,8 @@ set(SOURCES
     src/audio_consumer.c
     src/audio_dsp_example.c
     src/OpenPDMFilter.c
+    src/network.cpp
+    src/tcp_server.c
 )
 
 # Create executable for vibecode4
@@ -104,6 +106,7 @@ pico_generate_pio_header(vibecode4 ${CMAKE_CURRENT_LIST_DIR}/src/pdm_clock.pio)
 target_compile_definitions(vibecode4 PRIVATE
     PICO_DEFAULT_UART_TX_PIN=16
     PICO_DEFAULT_UART_RX_PIN=17
+    CYW43_LWIP=1
 )
 
 
@@ -119,7 +122,8 @@ target_link_libraries(vibecode4
     lvgl
     FreeRTOS-Kernel
     FreeRTOS-Kernel-Heap4
-    # pico_cyw43_arch_none
+    pico_cyw43_arch_lwip_poll
+    pico_lwip
     pico_status_led
 
 )

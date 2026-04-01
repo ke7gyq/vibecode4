@@ -1,5 +1,8 @@
 build/
 
+# Secrets file - contains WiFi credentials
+src/secrets.h
+
 # Emacs backup files
 *~
 #*#
