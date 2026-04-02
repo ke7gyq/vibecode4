@@ -1,7 +1,11 @@
 build/
+deleteMe/
 
 # Secrets file - contains WiFi credentials
 src/secrets.h
+
+# Auto-generated LUT file - created by CMake build process
+build/generated/LUT_Params.h
 
 # Emacs backup files
 *~

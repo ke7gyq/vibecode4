@@ -11,8 +11,8 @@
 #include "parser.h"
 #include "widgets.h"
 #include "microphone.h"
-#include "audio_consumer.h"
 #include "network.h"
+#include "tcp_server.h"
 // #include "pico/cyw43_arch.h"
 
 
@@ -219,6 +219,7 @@ static void parser_task(void *parameters)
 int main(void)
 {
     // Initialize UART first before any printf calls
+
     stdio_init_all();
     sleep_ms(100);  // Give UART time to initialize
     printf("Vibecode4 - FreeRTOS with LVGL\n");
@@ -252,7 +253,8 @@ int main(void)
     result = xTaskCreate(
         timer_task,           // Task function
         "TimerTask",          // Task name
-        2048,                 // Stack size in words
+        1536,
+        // 2048,                 // Stack size in words
         NULL,                 // Parameters
         2,                    // Priority: lower than microphone for real-time audio
         &timer_handle
@@ -266,7 +268,8 @@ int main(void)
     result = xTaskCreate(
         blinker_task,
         "BlinkerTask",
-        1024,
+        // 1024,
+        256,
         NULL,
         2,
         &blinker_handle
@@ -281,9 +284,10 @@ int main(void)
     result = xTaskCreate(
         parser_task,
         "ParserTask",
-        2048,
+        512,
+        // 2048,
         NULL,
-        1,
+        2,  /* Priority: handle keyboard input */
         &parser_handle
     );
     if (result != pdPASS) {
@@ -299,7 +303,7 @@ int main(void)
     result = xTaskCreate(
         microphone_task,
         "MicrophoneTask",
-        2048,
+        512,
         NULL,
         3,  /* Priority: highest - real-time audio capture */
         NULL
@@ -308,9 +312,6 @@ int main(void)
         printf("Failed to create microphone task\n");
         return 1;
     }
-    
-    // Audio consumer task - processes audio buffers
-    audio_consumer_init();
     #endif
 
     #if(1)
@@ -318,7 +319,7 @@ int main(void)
     result = xTaskCreate(
         network_task,         // Task function
         "NetworkTask",        // Task name
-        8192,
+        512,
         // 2048,                 // Stack size in words
         NULL,                 // Parameters
         2,                    // Priority (between timer/blinker and low tasks)
@@ -329,6 +330,25 @@ int main(void)
         return 1;
     }
     #endif
+
+    #if(1)
+    // UDP Audio Task - sends audio frames when timer notifies it
+    // Stack: 2048 words = 8KB (large to prevent stack overflow with frame buffer)
+    // Priority 2: Medium-high, below microphone (3) to avoid starving parser task
+    result = xTaskCreate(
+        udp_audio_task,       // Task function
+        "UdpAudioTask",       // Task name
+        2048,                 // Stack size in words (8KB - much safer margin)
+        NULL,                 // Parameters
+        2,                    // Priority: medium-high (not higher than needed)
+        NULL                  // Task handle (not needed)
+    );
+    if (result != pdPASS) {
+        printf("Failed to create UDP audio task\n");
+        return 1;
+    }
+    #endif
+
     printf("Starting FreeRTOS scheduler...\n");
     vTaskStartScheduler();
     

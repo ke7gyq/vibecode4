@@ -368,42 +368,42 @@ static uint8_t fnRtosStatus(char *rest, void *v) {
 }
 
 /**
- * Token function for the "tcpStart" command
- * Starts the TCP server (sends "Hello X" to telnet clients on port 5000)
+ * Token function for the "udpStart" command
+ * Starts the UDP server (sends audio frames to UDP clients on port 5001)
  */
-static uint8_t fnTcpStart(char *rest, void *v) {
+static uint8_t fnUdpStart(char *rest, void *v) {
     (void)rest;
     (void)v;
     
-    if (tcp_server_is_running()) {
-        printf("TCP Server: Already running\n");
+    if (udp_server_is_running()) {
+        printf("UDP Server: Already running\n");
         return 0;
     }
     
-    int result = tcp_server_start();
+    int result = udp_server_start();
     if (result == 0) {
-        printf("TCP Server: Started (connect via: telnet <IP> 5000)\n");
+        printf("UDP Server: Started (send UDP packet to port 5001 to register)\n");
     } else {
-        printf("TCP Server: Failed to start\n");
+        printf("UDP Server: Failed to start\n");
     }
     return result;
 }
 
 /**
- * Token function for the "tcpStop" command
- * Stops the TCP server
+ * Token function for the "udpStop" command
+ * Stops the UDP server
  */
-static uint8_t fnTcpStop(char *rest, void *v) {
+static uint8_t fnUdpStop(char *rest, void *v) {
     (void)rest;
     (void)v;
     
-    if (!tcp_server_is_running()) {
-        printf("TCP Server: Not running\n");
+    if (!udp_server_is_running()) {
+        printf("UDP Server: Not running\n");
         return 0;
     }
     
-    tcp_server_stop();
-    printf("TCP Server: Stopped\n");
+    udp_server_stop();
+    printf("UDP Server: Stopped\n");
     return 0;
 }
 
@@ -423,8 +423,8 @@ static const struct s_tokens aTokens[] = {
     {"wifiConnect", "Connect to WiFi (usage: wifiConnect SSID pass)", fnWifiConnect},
     {"wifiStatus",  "Check WiFi connection status",         fnWifiStatus},
     {"rtosStatus",  "Display FreeRTOS task stack usage",    fnRtosStatus},
-    {"tcpStart",    "Start TCP server (telnet port 5000)",  fnTcpStart},
-    {"tcpStop",     "Stop TCP server",                      fnTcpStop},
+    {"udpStart",    "Start UDP server (audio on port 5001)",  fnUdpStart},
+    {"udpStop",     "Stop UDP server",                      fnUdpStop},
     {NULL,          NULL,                                    NULL}
 };
 

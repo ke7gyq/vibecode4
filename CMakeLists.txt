@@ -56,6 +56,30 @@ pico_sdk_init()
 # Include FreeRTOS Kernel for RP2350
 include(${FREERTOS_KERNEL_PATH}/portable/ThirdParty/Community-Supported-Ports/GCC/RP2350_ARM_NTZ/FreeRTOS_Kernel_import.cmake)
 
+# =====================================================================
+# Generate LUT_Params.h from microphone_config.h
+# =====================================================================
+set(MICROPHONE_CONFIG_H "${CMAKE_CURRENT_SOURCE_DIR}/src/microphone_config.h")
+set(LUT_PARAMS_H "${CMAKE_CURRENT_BINARY_DIR}/generated/LUT_Params.h")
+
+# Ensure generated directory exists
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated")
+
+# Add custom command to generate LUT_Params.h
+add_custom_command(
+    OUTPUT "${LUT_PARAMS_H}"
+    COMMAND ${CMAKE_COMMAND} -E echo "Generating LUT_Params.h..."
+    COMMAND python3 "${CMAKE_CURRENT_SOURCE_DIR}/utils/generate_lut.py"
+            "${MICROPHONE_CONFIG_H}"
+            "${LUT_PARAMS_H}"
+    DEPENDS "${MICROPHONE_CONFIG_H}" "${CMAKE_CURRENT_SOURCE_DIR}/utils/generate_lut.py"
+    COMMENT "Generating OpenPDM2PCM LUT lookup table"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
+)
+
+# Add custom target to track LUT generation
+add_custom_target(generate_lut ALL DEPENDS "${LUT_PARAMS_H}")
+
 # Source files
 set(SOURCES
     src/main.c
@@ -64,19 +88,22 @@ set(SOURCES
     src/parser.c
     src/widgets.c
     src/microphone.c
-    src/audio_consumer.c
     src/audio_dsp_example.c
     src/OpenPDMFilter.c
-    src/network.cpp
-    src/tcp_server.c
+    src/network.c
+    src/udp_audio_server.c
 )
 
 # Create executable for vibecode4
 add_executable(vibecode4 ${SOURCES})
 
+# Make vibecode4 depend on LUT generation
+add_dependencies(vibecode4 generate_lut)
+
 # Include directories for main executable
 target_include_directories(vibecode4 PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_BINARY_DIR}/generated
     ${LVGL_PATH}
     ${PICO_SDK_PATH}/src/rp2_common/hardware_gpio/include
     ${PICO_SDK_PATH}/src/rp2_common/hardware_pio/include
@@ -107,6 +134,8 @@ target_compile_definitions(vibecode4 PRIVATE
     PICO_DEFAULT_UART_TX_PIN=16
     PICO_DEFAULT_UART_RX_PIN=17
     CYW43_LWIP=1
+    PICO_CYW43_LOGGING_ENABLED=0
+    USE_CONST_LUT=1
 )
 
 

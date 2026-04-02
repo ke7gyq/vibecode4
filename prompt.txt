@@ -108,3 +108,14 @@ please add the following file to vibecode4. secretes.h. Include secretes.h in ne
 WIFI_SSID "foo"
 WIFI_PASSED "kita_is_my_dog"
 
+In the file prompt.c, check to see if wif-ssid and wifi_pass have been defined. Try to include secretes.h. Only warn if the file cannot be included. If the wifi-ssid and wifi-pass have been defined, then set
+use these as the defauilts  for connecting to the fnWiFiConnect function.
+
+Refactor network.cpp to network.c. We arn't using C++ here. Make the file a simple "c" file.
+
+Add an additional socket that takes filtered buffers from microphone.c and transmits the PCM data stream over TCP when an external host makes a connection to the pico.
+The ScanWiFi function should stop when the wifi scan times out. Don't print the line "[CYW43] do_ioctl(2, 263, 16): timeout" Consolidate the functions wifiList and scanWiFi.
+
+
+
+

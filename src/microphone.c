@@ -1,4 +1,5 @@
 #include "microphone.h"
+#include "microphone_config.h"
 #include "OpenPDMFilter.h"
 #include "pico/stdlib.h"
 #include "hardware/gpio.h"
@@ -10,6 +11,7 @@
 #include "gpio_toggle_test.pio.h"
 #include "FreeRTOS.h"
 #include "task.h"
+#include "semphr.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -64,7 +66,6 @@ static void pdm_dma_handler(void);
 /* Global state */
 volatile uint8_t g_audioReady = 0;
 AudioBuffers_t g_audioBuffers;
-SemaphoreHandle_t g_audioReadySemaphore = NULL;
 uint8_t g_micDebug = 0;  /* Microphone debug level: 0=OFF, 2+=ON */
 
 /* Microphone state */
@@ -72,6 +73,7 @@ static bool g_microphone_initialized = false;
 static PIO g_pio = NULL;
 static uint g_sm = 0;
 static uint g_dma_ch = 0;
+static TaskHandle_t g_microphone_task_handle = NULL;  /* Handle for DMA ISR to notify */  
 
 /* DMA buffers - ping-pong pair for alternating fills */
 static uint32_t g_dma_buffer_a[DMA_BUFFER_WORDS];  /* 96 words = 384 bytes */
@@ -95,17 +97,35 @@ static TPDMFilter_InitStruct g_pdm_filter_config = {0};
  * - High-pass filter: 50 Hz (remove DC offset)
  * - Volume: 16 (standard gain)
  */
+
+/* ==================== DMA Interrupt Handler (for microphone task) ==================== */
+/**
+ * DMA interrupt handler for microphone task's DMA channel
+ * Signals the microphone task that a buffer fill is complete using task notification
+ */
+static void microphone_dma_irq_handler(void) {
+    /* Clear interrupt flag */
+    dma_hw->ints0 = (1u << g_dma_ch);
+    
+    /* Notify the microphone task that DMA is complete */
+    if (g_microphone_task_handle != NULL) {
+        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+        vTaskNotifyGiveFromISR(g_microphone_task_handle, &xHigherPriorityTaskWoken);
+        portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+    }
+}
+
 void pdm_filter_config_init(void)
 {
-    g_pdm_filter_config.LP_HZ = 10000.0f;      /* Low-pass cutoff: 10 kHz */
-    g_pdm_filter_config.HP_HZ = 50.0f;         /* High-pass cutoff: 50 Hz (removes DC) */
-    g_pdm_filter_config.Fs = PCM_SAMPLE_RATE_HZ; /* Output sample rate from compile-time config */
-    g_pdm_filter_config.In_MicChannels = 1;    /* Mono input */
-    g_pdm_filter_config.Out_MicChannels = 1;   /* Mono output */
-    g_pdm_filter_config.Decimation = DECIMATION_RATIO; /* Decimation from compile-time config */
-    g_pdm_filter_config.MaxVolume = 16;        /* Standard gain */
+    g_pdm_filter_config.LP_HZ = AUDIO_FILTER_LP_HZ;           /* Low-pass cutoff from config */
+    g_pdm_filter_config.HP_HZ = AUDIO_FILTER_HP_HZ;           /* High-pass cutoff from config */
+    g_pdm_filter_config.Fs = PCM_SAMPLE_RATE_HZ;              /* Output sample rate from compile-time config */
+    g_pdm_filter_config.In_MicChannels = 1;                   /* Mono input */
+    g_pdm_filter_config.Out_MicChannels = 1;                  /* Mono output */
+    g_pdm_filter_config.Decimation = DECIMATION_RATIO;        /* Decimation from compile-time config */
+    g_pdm_filter_config.MaxVolume = AUDIO_FILTER_MAX_VOLUME;  /* Volume scaling from config */
 #ifdef PICO_BUILD
-    g_pdm_filter_config.Gain = 1;              /* Additional gain multiplier */
+    g_pdm_filter_config.Gain = AUDIO_FILTER_GAIN;             /* Additional gain multiplier from config */
 #endif
     
     /* Initialize the filter (builds sinc³ coefficients and LUT) */
@@ -322,15 +342,20 @@ static bool dma_init_pdm(void)
     channel_config_set_transfer_data_size(&config, DMA_SIZE_32);  /* Transfer 32-bit words */
     channel_config_set_bswap(&config, true);  /* Enable byte swap for endianness */
     
-    /* Start with buffer A */
+    /* Configure with buffer A (but don't start yet) */
     dma_channel_configure(
         g_dma_ch,
         &config,
         g_dma_buffer_a,                 /* Destination: Buffer A */
         &g_pio->rxf[g_sm],              /* Source: PIO RX FIFO */
         DMA_BUFFER_WORDS,               /* Transfer count: 96 words = 384 bytes */
-        true                            /* Start immediately */
+        false                           /* Don't start yet - will start after task is ready */
     );
+    
+    /* Set up DMA completion interrupt */
+    irq_set_exclusive_handler(DMA_IRQ_0, microphone_dma_irq_handler);
+    dma_channel_set_irq0_enabled(g_dma_ch, true);
+    irq_set_enabled(DMA_IRQ_0, true);
     
     printf("DMA channel configured: %d words per transfer (%.1f ms)\n", 
            DMA_BUFFER_WORDS,
@@ -348,6 +373,9 @@ void microphone_task(void *parameters)
     (void)parameters;
     
     printf("Microphone Task Started\n");
+    
+    /* Store this task's handle for DMA ISR notifications */
+    g_microphone_task_handle = xTaskGetCurrentTaskHandle();
     
     if (!microphone_init()) {
         printf("ERROR: Failed to initialize microphone\n");
@@ -375,48 +403,39 @@ void microphone_task(void *parameters)
     /* Statistics */
     uint32_t sample_count = 0;
     uint32_t buffer_count = 0;
+    uint32_t last_sample_count = 0;
+    uint32_t stats_counter = 0;  /* Counter to check time only every N iterations */
+    uint32_t last_stats_time = to_ms_since_boot(get_absolute_time());
+    uint32_t stats_interval_ms = 1000;  /* Report stats every 1 second */
+    #define STATS_CHECK_INTERVAL 1000  /* Check time every N buffer productions */
     
     /* DMA state */
     uint32_t *current_dma_buffer = g_dma_buffer_a;
     uint32_t *other_dma_buffer = g_dma_buffer_b;
-    bool dma_last_complete = false;
     
 #if USE_REAL_MICROPHONE
-    printf("[Mic] Starting REAL microphone mode...\n");
+    printf("[Mic] Starting REAL microphone mode (event-driven DMA)...\n");
+    
+    /* Start DMA now that task is ready to handle notifications */
+    dma_channel_start(g_dma_ch);
+    printf("[Mic] DMA started, waiting for audio...\n");
 #else
     printf("[Mic] Starting TEST mode (synthetic audio)...\n");
 #endif
     
     while (1) {
 #if USE_REAL_MICROPHONE
-        if (!dma_channel_is_busy(g_dma_ch) && !dma_last_complete) {
-            /* DMA finished filling current buffer */
-            dma_last_complete = true;
-            
-            /* IMMEDIATELY restart DMA on the other buffer (producer-consumer overlap) */
-            dma_channel_config config = dma_channel_get_default_config(g_dma_ch);
-            channel_config_set_read_increment(&config, false);
-            channel_config_set_write_increment(&config, true);
-            channel_config_set_dreq(&config, pio_get_dreq(g_pio, g_sm, false));
-            channel_config_set_transfer_data_size(&config, DMA_SIZE_32);
-            
-            dma_channel_configure(
-                g_dma_ch,
-                &config,
-                other_dma_buffer,           /* Start filling the other buffer */
-                &g_pio->rxf[g_sm],
-                DMA_BUFFER_WORDS,
-                true
-            );
-            
-            /* Now process the completed buffer with filter (while DMA fills other buffer) */
+        /* Wait for DMA completion notification (blocking, allows other tasks to run) */
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        {
+            /* DMA has completed - process the buffer */
             uint8_t *pdm_bytes = (uint8_t *)current_dma_buffer;
             
             if ((pcm_index + SAMPLES_PER_FILTER_CALL) <= AUDIO_BUFFER_SIZE) {
                 Open_PDM_Filter_64(
                     pdm_bytes,
                     &p_current_buffer[pcm_index],
-                    1,
+                    16,
                     &g_pdm_filter_config
                 );
                 
@@ -427,9 +446,6 @@ void microphone_task(void *parameters)
             } else {
                 /* Output buffer full */
                 g_audioReady = current_buffer;
-                if (g_audioReadySemaphore != NULL) {
-                    xSemaphoreGive(g_audioReadySemaphore);
-                }
                 
                 buffer_count++;
                 if (g_micDebug >= MIC_TRACE) {
@@ -443,19 +459,12 @@ void microphone_task(void *parameters)
                 pcm_index = 0;
                 filter_calls_accumulated = 0;
                 
-                /* Wait for consumer */
-                uint32_t timeout_ms = 100;
-                uint32_t start_time = to_ms_since_boot(get_absolute_time());
-                while (g_audioReady != 0 && (to_ms_since_boot(get_absolute_time()) - start_time) < timeout_ms) {
-                    vTaskDelay(pdMS_TO_TICKS(1));
-                }
-                
                 /* Process the buffer after switching */
                 if ((pcm_index + SAMPLES_PER_FILTER_CALL) <= AUDIO_BUFFER_SIZE) {
                     Open_PDM_Filter_64(
                         pdm_bytes,
                         &p_current_buffer[pcm_index],
-                        1,
+                        16,
                         &g_pdm_filter_config
                     );
                     pcm_index += SAMPLES_PER_FILTER_CALL;
@@ -464,13 +473,18 @@ void microphone_task(void *parameters)
                 }
             }
             
-            dma_last_complete = false;
-            
             /* Swap buffer pointers for next iteration */
             uint32_t *temp = current_dma_buffer;
             current_dma_buffer = other_dma_buffer;
             other_dma_buffer = temp;
-        }
+            
+            /* Re-trigger DMA for next buffer fill */
+            dma_channel_transfer_to_buffer_now(
+                g_dma_ch,
+                other_dma_buffer,           /* Fill the other buffer now */
+                DMA_BUFFER_WORDS
+            );
+        }  /* End of DMA notification block */
 #else
         /* Test mode */
         if (pcm_index < AUDIO_BUFFER_SIZE) {
@@ -481,9 +495,6 @@ void microphone_task(void *parameters)
             sample_count++;
         } else {
             g_audioReady = current_buffer;
-            if (g_audioReadySemaphore != NULL) {
-                xSemaphoreGive(g_audioReadySemaphore);
-            }
             
             buffer_count++;
             if (g_micDebug >= MIC_TRACE) {
@@ -495,15 +506,26 @@ void microphone_task(void *parameters)
                               g_audioBuffers.buffer1 : g_audioBuffers.buffer2;
             pcm_index = 0;
             
-            uint32_t timeout_ms = 100;
-            uint32_t start_time = to_ms_since_boot(get_absolute_time());
-            while (g_audioReady != 0 && (to_ms_since_boot(get_absolute_time()) - start_time) < timeout_ms) {
-                vTaskDelay(pdMS_TO_TICKS(1));
-            }
+            /* Don't wait - keep producing samples continuously */
         }
 #endif
         
-        vTaskDelay(pdMS_TO_TICKS(1));
+        /* Periodic statistics reporting - only check time every N iterations */
+        if (++stats_counter >= STATS_CHECK_INTERVAL) {
+            stats_counter = 0;
+            uint32_t current_time = to_ms_since_boot(get_absolute_time());
+            if (current_time - last_stats_time >= stats_interval_ms) {
+                uint32_t samples_this_interval = sample_count - last_sample_count;
+                uint32_t ms_elapsed = current_time - last_stats_time;
+                float sample_rate = (samples_this_interval * 1000.0f) / (float)ms_elapsed;
+                if (g_micDebug >= 4) {
+                    printf("[MicStats] Rate: %.0f Hz, Total: %lu samples, Buffers: %lu\n", 
+                           sample_rate, sample_count, buffer_count);
+                }
+                last_sample_count = sample_count;
+                last_stats_time = current_time;
+            }
+        }
     }
 }
 
@@ -517,15 +539,6 @@ bool microphone_init(void)
     }
     
     printf("Initializing microphone system...\n");
-    
-    /* Create binary semaphore if not exists */
-    if (g_audioReadySemaphore == NULL) {
-        g_audioReadySemaphore = xSemaphoreCreateBinary();
-        if (g_audioReadySemaphore == NULL) {
-            printf("ERROR: Failed to create audio semaphore\n");
-            return false;
-        }
-    }
     
     /* Initialize buffers */
     memset(&g_audioBuffers, 0, sizeof(g_audioBuffers));

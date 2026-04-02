@@ -31,16 +31,33 @@
  
 #include "OpenPDMFilter.h"
  
- 
+/* Configuration -----------------------------------------------------------*/
+
+/*
+ * Set to 1 to use pre-computed const LUT from LUT_Params.h
+ * Set to 0 to compute LUT dynamically at runtime
+ * Can be controlled via CMake with -DUSE_CONST_LUT=1 or -DUSE_CONST_LUT=0
+ */
+#ifndef USE_CONST_LUT
+#define USE_CONST_LUT 0
+#endif
+
+#if USE_CONST_LUT
+#include "LUT_Params.h"
+#endif
+
+
 /* Variables -----------------------------------------------------------------*/
- 
+
 uint32_t div_const = 0;
 int64_t sub_const = 0;
 uint32_t sinc[DECIMATION_MAX * SINCN];
 uint32_t sinc1[DECIMATION_MAX];
 uint32_t sinc2[DECIMATION_MAX * 2];
+#if !USE_CONST_LUT
 uint32_t coef[SINCN][DECIMATION_MAX];
-#ifdef USE_LUT
+#endif
+#if defined(USE_LUT) && !USE_CONST_LUT
 int32_t lut[256][DECIMATION_MAX / 8][SINCN];
 #endif
  
@@ -185,6 +202,7 @@ void Open_PDM_Filter_Init(TPDMFilter_InitStruct *Param)
   sinc[decimation * SINCN - 1] = 0;      
   convolve(sinc1, decimation, sinc1, decimation, sinc2);
   convolve(sinc2, decimation * 2 - 1, sinc1, decimation, &sinc[1]);     
+#if !USE_CONST_LUT
   for(j = 0; j < SINCN; j++) {
     for (i = 0; i < decimation; i++) {
       coef[j][i] = sinc[j * decimation + i];
@@ -195,9 +213,14 @@ void Open_PDM_Filter_Init(TPDMFilter_InitStruct *Param)
   sub_const = sum >> 1;
   div_const = sub_const * Param->MaxVolume / 32768 / FILTER_GAIN;
   div_const = (div_const == 0 ? 1 : div_const);
+#else
+  /* When using const LUT, use pre-computed constants from LUT_Params.h */
+  div_const = LUT_DIV_CONST;
+  sub_const = LUT_SUB_CONST;
+#endif
  
-#ifdef USE_LUT
-  /* Look-Up Table. */
+#if defined(USE_LUT) && !USE_CONST_LUT
+  /* Look-Up Table - computed dynamically at runtime. */
   uint16_t c, d, s;
   for (s = 0; s < SINCN; s++)
   {
@@ -213,6 +236,8 @@ void Open_PDM_Filter_Init(TPDMFilter_InitStruct *Param)
                        ((c >> 1) & 0x01) * coef_p[d * 8 + 6] +
                        ((c     ) & 0x01) * coef_p[d * 8 + 7];
   }
+#elif USE_CONST_LUT
+  /* Look-Up Table - using pre-computed const values from LUT_Params.h */
 #endif
 }
  
