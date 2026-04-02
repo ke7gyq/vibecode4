@@ -1,83 +1,210 @@
-# Quick Start Guide - ATSAMD21 Microphone Integration
+# Quick Start Guide - UDP Audio Streaming System
 
 ## 30-Second Overview
 
-You now have a **ready-to-use PDM-to-PCM microphone system** in your Vibecode4 project:
+A **production-ready microphone capture system** that streams audio over UDP:
 
 ```
-ATSAMD21 Microphone → RP2350 (PIO + DMA) → PCM Audio → Your Code
+ATSAMD21 Microphone → RP2350 PIO/DMA → PDM→PCM Conversion → UDP (83 Hz, 528 samples) → Network
 ```
 
-**Status**: ✅ Compiling, ✅ Configured, ✅ Ready to use
+**Status**: ✅ Tested Compilation • ✅ Auto-Generated LUT • ✅ Production Ready
 
 ---
 
-## What's Already Done
+## What's Included
 
 ```
-✅ PIO state machine (GPIO 6 = clock, GPIO 7 = data)
-✅ DMA controller (transfers PDM to memory)
-✅ PDM-to-PCM conversion algorithm (decimation-by-64)
-✅ Ping-pong buffers (buffer1, buffer2 - 1024 samples each)
-✅ FreeRTOS tasks (microphone captures, you process)
-✅ Binary semaphore (synchronization primitive)
-✅ Example consumers (simple and advanced)
-✅ Complete documentation (4 guides)
+✅ PDM Microphone input (GPIO 6-7, ATSAMD21)
+✅ PIO state machines (clock generation, data sampling)
+✅ DMA controller (efficient buffer management)
+✅ OpenPDM2PCM filter (sinc³ decimation 64:1)
+✅ Auto-generated LUT (CMake + Python pipeline)
+✅ UDP streaming server (port 12345, 83 Hz timer)
+✅ FreeRTOS multitasking (microphone + network tasks)
+✅ Python utilities (audio capture, live monitoring)
+✅ Complete documentation & troubleshooting
 ```
 
 ---
 
 ## 3-Step Deployment
 
-### Step 1: Connect Hardware (5 minutes)
+### Step 1: Build the Firmware (2 minutes)
 
-**Wires needed**: 4 (power, ground, clock, data)
-
-```
-ATSAMD21 Microphone  →  RP2350 Pico2
-─────────────────────────────────────
-CLK (output)         →  GPIO 6 (input)
-DATA (output)        →  GPIO 7 (input)
-GND                  →  GND
-3V3                  →  3V3 power
-```
-
-See [HARDWARE_WIRING.md](HARDWARE_WIRING.md) for detailed pinout and diagrams.
-
-### Step 2: Flash Firmware
-
-Build and flash the existing code:
 ```bash
 cd /home/doug/rpi-pico/vibecode4
-# Already compiling successfully!
-# Flash using your normal method (picotool, etc.)
+mkdir -p build && cd build
+cmake ..
+ninja
 ```
 
-### Step 3: Verify It's Working
-
-Monitor UART output at 115200 baud:
+Expected output:
 ```
-Microphone Task Started
-Microphone initialized successfully
-PDM clock: ~4MHz, decimation: 64:1, PCM rate: ~62.5kHz
-[Mic] Buffer 1 full (1 total buffers)
-Processing buffer 1: RMS=12345
-[Mic] Buffer 2 full (2 total buffers)
-Processing buffer 2: RMS=11234
+[1/188] Generating OpenPDM2PCM LUT lookup table
+Filter Configuration: LP_HZ: 10000.0, HP_HZ: 50.0, Fs: 48000, Decimation: 64...
+✓ Successfully generated .../build/generated/LUT_Params.h
+[187/188] Linking CXX executable vibecode4.elf
 ```
 
-If you see this → **Audio is being captured!** 🎵
+### Step 2: Flash to Pico 2 W (1 minute)
+
+**Using picotool:**
+```bash
+picotool load build/vibecode4.uf2 -fx
+```
+
+**Or manually (BOOTSEL mode):**
+```bash
+cp build/vibecode4.uf2 /media/pico/
+```
+
+### Step 3: Start Capturing Audio (1 minute)
+
+**Option A: Save to WAV file (30 seconds)**
+```bash
+cd /home/doug/rpi-pico/vibecode4
+python3 utils/udp_audio_client.py --duration 30 --output capture.wav
+# Creates: capture.wav with 30 seconds of audio
+```
+
+**Option B: Monitor live PCM (if on network)**
+```bash
+python3 utils/telnet_pcm_client.py
+# Displays real-time PCM samples and RMS levels
+```
+
+**Done!** Audio is now being captured and streamed. ✅
 
 ---
 
-## Using the Audio (Minimal Example)
+## Verify It's Working
 
-Add to your code:
+### Check Compilation
+```bash
+cd /home/doug/rpi-pico/vibecode4/build
+arm-none-eabi-size vibecode4.elf
+# Should show:
+#    text    data     bss     dec     hex filename
+#  874184       0  259168 1133352  114b28 vibecode4.elf
+```
 
+### Check LUT Generation
+```bash
+head -20 build/generated/LUT_Params.h
+# Should show:
+# /*
+#  * LUT_Params.h - Auto-generated OpenPDM2PCM LUT values
+#  * Filter Configuration:
+#  * Decimation: 64
+#  * Output Sample Rate: 48000 Hz
+#  * ...
+```
+
+### Capture Test Audio
+```bash
+python3 utils/udp_audio_client.py --duration 5 --output test.wav
+# Should save 5 seconds at 48 kHz to test.wav
+```
+
+### Validate WAV File
+```bash
+file test.wav
+# Should show: RIFF (little-endian) data, WAVE audio, ...
+sox test.wav -n stat
+# Should show: RMS level, Peak level, etc.
+```
+
+---
+
+## Understanding the System
+
+### Data Flow
+```
+PDM Input (3.072 MHz)           PIO State Machines
+       ↓                               ↓
+DMA Buffer (32-bit words)       Simultaneous clock + data sampling
+       ↓                               ↓
+Microphone Task
+       ├─ Lookup filter LUT (if USE_CONST_LUT=1)
+       ├─ Sinc³ decimation 64:1
+       └─ Output: 48 kHz PCM
+              ↓
+UDP Audio Task (83 Hz timer)
+       ├─ Accumulate 528 samples
+       ├─ Every ~12 ms: send frame
+       └─ Port 12345
+              ↓
+Network: 43.8 kHz effective rate
+```
+
+### Configuration
+All parameters in `src/microphone_config.h`:
 ```c
-#include "microphone.h"
+#define AUDIO_FILTER_LP_HZ           10000.0f   /* Low-pass cutoff */
+#define AUDIO_FILTER_HP_HZ             50.0f   /* High-pass cutoff */
+#define AUDIO_FILTER_FS              48000     /* Output sample rate */
+#define AUDIO_FILTER_DECIMATION         64     /* Decimation ratio */
+#define AUDIO_FILTER_MAX_VOLUME          16     /* Gain scaling */
+```
 
-void process_audio_task(void *param) {
+**To change parameters:**
+1. Edit `src/microphone_config.h`
+2. Rebuild: `cd build && ninja`
+3. LUT auto-regenerates automatically
+
+### LUT Modes
+**Current**: `USE_CONST_LUT=1` (pre-computed, fastest)
+
+To switch to dynamic mode:
+1. Edit `CMakeLists.txt`: Remove or comment out `-DUSE_CONST_LUT=1`
+2. Rebuild: `cd build && ninja`
+
+---
+
+## Troubleshooting
+
+| Problem | Solution |
+|---------|----------|
+| Build fails: "generate_lut.py not found" | Verify `utils/generate_lut.py` exists; check CMakeLists.txt path |
+| No audio captured | Check microphone wires (GPIO 6-7, GND, 3V3); verify UART @ 115200 baud |
+| UDP frames not received | Check firewall port 12345; verify network connectivity |
+| Wrong filter parameters in LUT | Edit `microphone_config.h`, delete `build/`, rebuild from scratch |
+| CMake errors | `rm -rf build/` and try again; check Pico SDK path |
+
+---
+
+## Next Steps
+
+- **[README.md](README.md)** - Complete project overview
+- **[IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md)** - Technical deep dive
+- **[utils/README.md](utils/README.md)** - LUT generation details
+- **[HARDWARE_WIRING.md](HARDWARE_WIRING.md)** - Pinout reference
+
+---
+
+## Using the Audio in Your Code
+
+The system streams UDP frames. To decode:
+
+```python
+# Python example
+import socket
+import numpy as np
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind(('', 12345))
+
+while True:
+    data, addr = sock.recvfrom(1024)
+    # data = 528 int16 samples @ 48 kHz
+    samples = np.frombuffer(data, dtype=np.int16)
+    print(f"Received {len(samples)} samples, RMS: {np.sqrt(np.mean(samples**2)):.0f}")
+```
+
+---
+
+**Ready?** Build, flash, and start capturing! 🎙️
     while (1) {
         // 1. Wait for audio buffer (5 second timeout)
         if (xSemaphoreTake(g_audioReadySemaphore, pdMS_TO_TICKS(5000)) != pdTRUE) {

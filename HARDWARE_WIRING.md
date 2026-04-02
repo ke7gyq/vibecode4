@@ -1,22 +1,15 @@
-# Hardware Connection Guide - ATSAMD21 PDM Microphone to RP2350
+# Hardware Connection Guide - Microphone to RP2350
 
-## Pinout Diagram
+## Quick Summary
 
 ```
-ATSAMD21 MEMS Microphone Module
-╔══════════════════════════════════════╗
-║ [1] CLK  ──────┐                    ║  Typical pinout
-║ [2] DATA ──────┤                    ║  (verify your module)
-║ [3] GND  ──────┤                    ║
-║ [4] 3V3  ──────┤                    ║
-╚══════════════════════════════════════╝
-                 │
-    ┌────────────┼────────────┐
-    │            │            │
-    ▼            ▼            ▼
-   
-   GPIO 6      GPIO 7        GND    3V3
-   (Clock)     (Data)     (to Pico2)
+ATSAMD21 Microphone  →  Raspberry Pi Pico 2 W
+──────────────────────────────────────────────
+CLK (output)        →  GPIO 6 (PIO input)
+DATA (output)       →  GPIO 7 (PIO input)
+GND                 →  GND
+3V3                 →  3V3 (Pico provides power)
+```
 ```
 
 ## RP2350 Pico2 Connections
