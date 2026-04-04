@@ -11,3 +11,6 @@ build/generated/LUT_Params.h
 *~
 #*#
 .#*
+
+# Audio files
+*.wav

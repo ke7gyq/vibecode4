@@ -1,404 +1,397 @@
-# ATSAMD21 MEMS PDM Microphone Integration - Complete Guide
+# Microphone Audio System Integration Guide
 
 ## Quick Start
 
-You now have a complete PDM-to-PCM microphone system integrated into your Vibecode4 project. Here's how to use it:
+The PDM microphone system is fully integrated and ready to use. Audio buffers are filled automatically by the microphone task and signaled via semaphore.
 
-### 1. **Minimal Implementation** (Basic Audio Capture)
-
-The basic system is already active. It captures PDM audio and converts it to PCM:
-
-- **Microphone Task**: Runs continuously, fills ping-pong buffers with PCM audio
-- **Consumer Interface**: Use binary semaphore + `g_audioReady` variable to consume buffers
-
-### 2. **Add Consumer Task** (Start Processing Audio)
-
-Add to your code:
+### Basic Consumer Pattern
 
 ```c
 #include "microphone.h"
 
-void my_audio_task(void *param) {
-    // Wait for audio ready
-    if (xSemaphoreTake(g_audioReadySemaphore, pdMS_TO_TICKS(5000)) == pdTRUE) {
-        // Check which buffer has data
-        uint8_t buffer_id = get_audio_ready();
+void my_audio_consumer_task(void *param) {
+    (void)param;
+    
+    while (1) {
+        // 1. Wait for audio buffer (timeout = 1 second)
+        BaseType_t result = xSemaphoreTake(g_audioReadySemaphore, pdMS_TO_TICKS(1000));
         
-        // Get the audio buffer
-        int16_t *p_audio = (buffer_id == 1) ? g_audioBuffers.buffer1 
-                                             : g_audioBuffers.buffer2;
-        
-        // Process 1024 int16_t samples
-        for (int i = 0; i < 1024; i++) {
-            int16_t sample = p_audio[i];
-            // ... your processing ...
+        if (result != pdTRUE) {
+            printf("Timeout waiting for audio\n");
+            continue;
         }
         
-        // Signal done
+        // 2. Get which buffer is ready (volatile, check immediately)
+        uint8_t buffer_id = get_audio_ready();
+        if (buffer_id == 0) {
+            printf("Stale semaphore\n");
+            continue;
+        }
+        
+        // 3. Get audio buffer pointer (safe - microphone writing to OTHER buffer)
+        int16_t *audio_buffer = (buffer_id == 1) ? g_audioBuffers.buffer1 
+                                                   : g_audioBuffers.buffer2;
+        
+        // 4. Process 528 int16_t samples (11 ms of audio at 48 kHz)
+        process_audio_chunk(audio_buffer, AUDIO_BUFFER_SIZE);
+        
+        // 5. Mark buffer consumed
         clear_audio_ready();
     }
 }
-```
 
-Then create the task:
-```c
-xTaskCreate(my_audio_task, "MyAudio", 2048, NULL, 2, NULL);
+// Create task in main.c:
+// xTaskCreate(my_audio_consumer_task, "AudioProc", 2048, NULL, 2, NULL);
 ```
 
 ---
 
 ## System Architecture
 
-```
-Hardware (PIO + DMA)
-│
-├─ PIO State Machine 0
-│  ├─ Generates PDM clock on GPIO 6 (~4 MHz)
-│  └─ Samples PDM data on GPIO 7 at rising edges
-│
-└─ DMA Channel 0
-   └─ Transfers PDM bits from PIO to memory buffer
+### Audio Signal Flow
 
-Software (FreeRTOS Tasks)
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    VIBECODE4 AUDIO SYSTEM                       │
+└─────────────────────────────────────────────────────────────────┘
+
+Hardware Layer
+├─ PDM Microphone (MEMS)
+│  └─ Serial data (1-bit @ 3.072 MHz)
 │
+└─ RP2350 Microcontroller
+   ├─ PIO0 SM2
+   │  ├─ Output: GPIO7 (PDM clock, 3.072 MHz)
+   │  └─ Input: GPIO6 (PDM data)
+   │
+   └─ DMA Channel 0 (Ping-Pong)
+      ├─ Transfer: PDM FIFO → RAM (96 words = 384 bytes)
+      ├─ Trigger: PIO SM2 data available
+      ├─ ISR: Posts task notification + re-triggers OTHER buffer
+      └─ Period: ~1 ms per buffer
+
+
+Software Layer (FreeRTOS)
 ├─ Microphone Task (Priority 2)
-│  ├─ Reads PDM data from DMA
-│  ├─ Converts to PCM (decimation-by-64)
-│  ├─ Fills buffer1 or buffer2 alternately
-│  └─ Posts semaphore when buffer full
+│  ├─ Waits on DMA completion notification
+│  ├─ Reads completed PDM buffer from DMA
+│  ├─ Calls Open_PDM_Filter_64() for 48 PCM samples
+│  ├─ Accumulates samples in output buffer
+│  ├─ When full: Posts g_audioReadySemaphore
+│  └─ Switches output buffer (ping-pong)
 │
-└─ Consumer Task (Priority 2)
-   ├─ Waits on binary semaphore
-   ├─ Reads g_audioReady (1 = buffer1, 2 = buffer2)
-   ├─ Processes audio (DSP, ML, stream, etc.)
-   └─ Calls clear_audio_ready()
+└─ Consumer Tasks
+   ├─ Waits on g_audioReadySemaphore
+   ├─ Gets audio pointer from g_audioBuffers
+   ├─ Processes 528 samples (11 ms of audio)
+   └─ Repeats
 ```
 
----
+### Concurrency Model
 
-## Files Created
+**Key Feature: True DMA/Filter Pipelining**
 
-### Core System
-- **[microphone.h](src/microphone.h)** - Main API
-- **[microphone.c](src/microphone.c)** - PIO/DMA, PDM→PCM conversion
-- **[pdm_microphone.pio](src/pdm_microphone.pio)** - PIO state machine program
+```
+Timeline:
+─────────────────────────────────────────────────────────────
 
-### Consumer Examples
-- **[audio_consumer.h/c](src/audio_consumer.h)** - Simple buffer consumer (example)
-- **[audio_dsp_example.h/c](src/audio_dsp_example.h)** - Advanced processing example (noise gate)
+Time 0: DMA fills LUT using buffer_a
+│
+├─ DMA complete ISR fires
+│  ├─ Clear IRQ
+│  ├─ Swap pointers (g_current ↔ g_other)
+│  ├─ Re-trigger DMA immediately for buffer_b ← PIPELINING!
+│  └─ Notify task
+│
+├─ Microphone task wakes
+│  ├─ Sync pointers from globals (already swapped by ISR)
+│  ├─ Filter buffer_a [task doing work]
+│  │
+│  └─ DMA fills buffer_b [CONCURRENT with filtering!]
+│
+Time ~1ms: Filtering done
+│
+└─ Task loops: re-read globals, process buffer_b next
 
-### Documentation
-- **[MICROPHONE_README.md](MICROPHONE_README.md)** - Detailed technical reference
-
----
-
-## Global Variables
-
-```c
-// Global status (check this to know which buffer is ready)
-extern volatile uint8_t g_audioReady;     // 0=none, 1=buffer1, 2=buffer2
-
-// Global audio buffers (raw data)
-extern AudioBuffers_t g_audioBuffers;     // Contains buffer1[1024] and buffer2[1024]
-
-// Global semaphore (synchronization primitive)
-extern SemaphoreHandle_t g_audioReadySemaphore;  // Posted when buffer ready
+Result: ~1 ms DMA operation overlaps with filtering
+        No idle time waiting for DMA between iterations
 ```
 
+### Pin Configuration
+
+| GPIO | Direction | Usage | Speed |
+|------|-----------|-------|-------|
+| 6 | Input | PDM Data | 3.072 MHz |
+| 7 | Output | PDM Clock | 3.072 MHz |
+
+Both routed through PIO0 State Machine 2
+
 ---
 
-## Consumer Task Pattern (Ping-Pong Buffer)
+## API Reference
 
-### Lock-Free Pattern (No Mutex)
-Works because microphone and consumer alternate buffers:
+### Data Structures
 
 ```c
-void consumer_task(void *param) {
+// ===== Audio Buffers =====
+typedef struct {
+    int16_t buffer1[AUDIO_BUFFER_SIZE];   // 528 samples (11 ms @ 48 kHz)
+    int16_t buffer2[AUDIO_BUFFER_SIZE];   // 528 samples
+} AudioBuffers_t;
+
+extern AudioBuffers_t g_audioBuffers;
+```
+
+### Global Variables
+
+```c
+// ===== Status =====
+extern volatile uint8_t g_audioReady;            // 0=none, 1=buffer1, 2=buffer2
+extern AudioBuffers_t g_audioBuffers;            // Audio samples (int16_t)
+extern SemaphoreHandle_t g_audioReadySemaphore;  // Binary semaphore
+
+// ===== Configuration =====
+extern uint8_t g_micDebug;  // 0=silent, 2+=verbose, 4+=stats
+```
+
+### Initialization
+
+```c
+bool microphone_init(void);
+```
+- Called automatically by microphone_task()
+- Creates semaphore, initializes PIO, configures DMA
+- Starts DMA channel
+- Returns: true on success
+
+### Status Functions
+
+```c
+uint8_t get_audio_ready(void);
+```
+- Returns which buffer has ready audio
+- Return values: 0 (none), 1 (buffer1), 2 (buffer2)
+
+```c
+void clear_audio_ready(void);
+```
+- Marks current audio buffer as consumed
+- Call after you finish processing
+
+### Consumer Task Entry
+
+```c
+void microphone_task(void *parameters);
+```
+- Main audio capture and conversion task
+- Created by application
+- Runs indefinitely: capture → filter → fill → notify → repeat
+
+---
+
+## Consumer Task Patterns
+
+### Pattern 1: Simple Linear Processing
+
+```c
+void audio_processor_task(void *param) {
     while (1) {
-        // 1. Wait for semaphore
-        xSemaphoreTake(g_audioReadySemaphore, pdMS_TO_TICKS(5000));
-        
-        // 2. Read which buffer (volatile!)
-        uint8_t buf_id = get_audio_ready();
-        
-        // 3. Get pointer
-        int16_t *p_buf = (buf_id == 1) ? g_audioBuffers.buffer1 
-                                        : g_audioBuffers.buffer2;
-        
-        // 4. Process (safe, microphone is writing to OTHER buffer)
-        for (int i = 0; i < 1024; i++) {
-            process_sample(p_buf[i]);
+        if (xSemaphoreTake(g_audioReadySemaphore, pdMS_TO_TICKS(1000)) == pdTRUE) {
+            uint8_t buf_id = get_audio_ready();
+            int16_t *audio = (buf_id == 1) ? g_audioBuffers.buffer1 
+                                            : g_audioBuffers.buffer2;
+            
+            // Process all 528 samples
+            for (int i = 0; i < AUDIO_BUFFER_SIZE; i++) {
+                int16_t sample = audio[i];
+                // ... do work on sample ...
+            }
+            
+            clear_audio_ready();
         }
-        
-        // 5. Mark consumed
-        clear_audio_ready();
     }
 }
 ```
 
----
-
-## Advanced: Noise Gate Example
-
-The `audio_dsp_example` shows real-world audio processing:
+### Pattern 2: Streamed Output (UDP)
 
 ```c
-#include "audio_dsp_example.h"
-
-int main() {
-    // ...
-    
-    // Configure noise gate
-    NoiseGateConfig_t gate_config = {
-        .threshold = 5000,        // Suppress signals below RMS=5000
-        .attack_ms = 10,          // 10ms to open gate
-        .release_ms = 500,        // 500ms to close gate
-    };
-    
-    // Start DSP processor (creates task internally)
-    audio_dsp_init(&gate_config);
-    
-    // ...
-}
-```
-
-This computes RMS, applies noise gate, and outputs statistics:
-```
-[DSP-10] RMS= 2345 Gate=X (  0.0%) threshold=5000
-[DSP-20] RMS=15234 Gate=O (100.0%) threshold=5000
-```
-
----
-
-## PDM to PCM Conversion Details
-
-### Algorithm: Decimation-by-64
-1. **PDM Input**: 1-bit digital audio at ~4 MHz
-2. **Accumulate**: Count set bits per 64-bit group
-3. **Scale**: Convert bit count to PCM range (-32768 to +32767)
-4. **Output**: Single 16-bit PCM sample
-
-### What It Means
-- **PDM**: "Pulse Density Modulation" - duty cycle encodes audio level
-  - More 1s in signal → louder sound
-  - More 0s in signal → quieter sound
-  
-- **PCM**: "Pulse Code Modulation" - standard digital audio format
-  - One sample per time interval
-  - -32768 to +32767 (full range)
-
-### Rates
-```
-PDM Clock:        ~4 MHz  (configurable)
-PDM Decimation:   64:1
-PCM Sample Rate:  ~62.5 kHz
-Latency:          ~16-32 ms per buffer
-```
-
----
-
-## Integration Checklist
-
-- [x] Microphone system implemented and compiling
-- [x] PIO state machine configured
-- [x] DMA initialized
-- [x] Ping-pong buffers allocated
-- [x] Binary semaphore created
-- [x] Microphone task running (produces data)
-- [ ] Consumer task implemented (YOUR CODE)
-- [ ] Connect ATSAMD21 microphone to GPIO 6 & 7
-- [ ] Test with actual microphone
-
----
-
-## Hardware Setup
-
-### Connections
-```
-ATSAMD21 Microphone          RP2350 Pico2
-─────────────────────────────────────────
-CLK (output)        ───→      GPIO 6 (input)
-DATA (output)       ───→      GPIO 7 (input)
-GND                 ───→      GND
-3V3                 ───→      3V3
-```
-
-### Minimal Setup
-- Pull GPIO 6 and 7 to 3V3 through ~10kΩ resistors (if not included in microphone module)
-- Add 100nF decoupling capacitor near microphone power pins
-- Keep wires short and away from high-frequency switching signals
-
----
-
-## Testing Your Implementation
-
-### Test 1: Verify Buffer Filling
-```c
-void test_buffer_filling(void *param) {
-    uint32_t count = 0;
+void udp_audio_streamer(void *param) {
     while (1) {
-        xSemaphoreTake(g_audioReadySemaphore, pdMS_TO_TICKS(5000));
-        printf("Buffer %d ready (count=%lu)\n", get_audio_ready(), ++count);
-        clear_audio_ready();
+        if (xSemaphoreTake(g_audioReadySemaphore, pdMS_TO_TICKS(1000)) == pdTRUE) {
+            uint8_t buf_id = get_audio_ready();
+            int16_t *audio = (buf_id == 1) ? g_audioBuffers.buffer1 
+                                            : g_audioBuffers.buffer2;
+            
+            // Send 528 samples over network
+            send_audio_frame(audio, AUDIO_BUFFER_SIZE);
+            
+            clear_audio_ready();
+        }
     }
 }
 ```
 
-Expected: Buffers alternate (1, 2, 1, 2, ...)
+### Pattern 3: Ring Buffer with Processing Lag
 
-### Test 2: Check Audio Levels
 ```c
-int64_t sum_sq = 0;
-for (int i = 0; i < 1024; i++) {
-    int32_t s = p_buffer[i];
-    sum_sq += s * s;
+#define RING_BUFFER_SIZE (3 * AUDIO_BUFFER_SIZE)  // 3 buffers
+int16_t ring_buffer[RING_BUFFER_SIZE];
+int ring_write_index = 0;
+
+void ring_buffer_feeder(void *param) {
+    while (1) {
+        if (xSemaphoreTake(g_audioReadySemaphore, pdMS_TO_TICKS(1000)) == pdTRUE) {
+            uint8_t buf_id = get_audio_ready();
+            int16_t *audio = (buf_id == 1) ? g_audioBuffers.buffer1 
+                                            : g_audioBuffers.buffer2;
+            
+            // Copy to ring buffer
+            memcpy(&ring_buffer[ring_write_index], audio, 
+                   AUDIO_BUFFER_SIZE * sizeof(int16_t));
+            ring_write_index = (ring_write_index + AUDIO_BUFFER_SIZE) % RING_BUFFER_SIZE;
+            
+            // Signal processor
+            xSemaphoreGive(ring_buffer_ready_semaphore);
+            
+            clear_audio_ready();
+        }
+    }
 }
-uint32_t rms = (uint32_t)sqrt(sum_sq / 1024);
-printf("RMS = %u\n", rms);
 ```
-
-Expected (silent): RMS < 1000  
-Expected (speaking): RMS > 10000
-
-### Test 3: Frequency Response
-Capture audio from a speaker playing known frequencies and analyze using:
-- FFT (Fourier Transform) to see spectrum
-- Autocorrelation for fundamental frequency
-- Energy distribution across frequency bands
 
 ---
 
-## Configuration & Tuning
+## Configuration
 
-### Change PDM Clock Rate
-In `microphone.c`, `pio_init_pdm()`:
+All audio parameters configured in [src/microphone_config.h](src/microphone_config.h):
 
 ```c
-// Current: 31.25f → ~4 MHz PDM → 62.5 kHz PCM sample rate
-// Other options:
-sm_config_set_clkdiv(&config, 62.5f);   // ~2 MHz PDM → 31.25 kHz PCM
-sm_config_set_clkdiv(&config, 15.625f); // ~8 MHz PDM → 125 kHz PCM
-sm_config_set_clkdiv(&config, 125.0f);  // ~1 MHz PDM → 15.6 kHz PCM
+#define PDM_SAMPLE_RATE_HZ    3072000    // 3.072 MHz PDM clock
+#define DECIMATION_RATIO      64         // 64:1 decimation
+#define PCM_SAMPLE_RATE_HZ    48000      // Output rate
+#define AUDIO_BUFFER_SIZE     528        // Samples per buffer (11 ms)
+#define AUDIO_FILTER_LP_HZ    10000.0f   // Low-pass frequency
+#define AUDIO_FILTER_HP_HZ    50.0f      // High-pass frequency
 ```
 
-### Change Buffer Size
-In `microphone.h`:
+Modify these to change audio capture behavior.
+
+---
+
+## Debugging & Diagnostics
+
+### Enable Verbose Output
+
 ```c
-#define AUDIO_BUFFER_SIZE 1024  // Change to whatever size you need
+g_micDebug = 4;  // Maximum verbosity
 ```
 
-### Change PIO/DMA Pins
-In `microphone.h`:
+**Output Examples:**
+```
+[Mic] Buffer 1 full (528 samples, 42 total)
+[UDP] Sending buffer 1
+[MicStats] Rate: 48000 Hz, Total: 22176 samples, Buffers: 42
+[AudioRate] TX: 48000 Hz, DROP: 0 Hz (90.9 frames/sec)
+```
+
+### Monitor Statistics
+
 ```c
-#define MIC_CLK_PIN     6      // PDM clock output
-#define MIC_DATA_PIN    7      // PDM data input
+printf("Audio Ready: %d\n", g_audioReady);
+printf("Buffer1[0]: %d (first sample)\n", g_audioBuffers.buffer1[0]);
 ```
 
----
+### Check Semaphore
 
-## Common Issues & Solutions
-
-### Issue: Consumer task never wakes up
-**Solution**: 
-- Add `printf()` statements in microphone_task to verify it's running
-- Check that `xSemaphoreGive()` is being called
-- Verify semaphore was created successfully
-
-### Issue: Audio data all zeros
-**Solution**:
-- Check physical connections (GPIO 6 clock, GPIO 7 data)
-- Verify ATSAMD21 microphone is powered and producing CLK
-- Verify GPIO functions are set to PIO mode
-- Check PIO state machine is enabled
-
-### Issue: Audio sounds wrong (extreme noise, clipping, etc.)
-**Solution**:
-- Reduce PDM clock rate (increase clock_div)
-- Add post-processing low-pass filter
-- Check electrical noise on GPIO wires (use shielded cable)
-- Verify ATSAMD21 timing matches expectations
-
-### Issue: Buffers overflow (consumer can't keep up)
-**Solution**:
-- Increase consumer task priority (reduce to 1 if possible)
-- Reduce processing time in consumer task
-- Split processing into multiple tasks
-- Stream/buffer audio to external storage
-
----
-
-## What's Ready to Deploy
-
-Your system currently:
-1. ✅ Captures PDM audio from ATSAMD21 microphone via PIO
-2. ✅ Converts PDM to PCM using decimation-by-64 filter
-3. ✅ Fills ping-pong buffers (buffer1, buffer2)
-4. ✅ Signals consumer via binary semaphore + `g_audioReady` flag
-5. ✅ Handles task synchronization with FreeRTOS
-
-All you need to do:
-1. ✏️ Create consumer task(s) that process the audio
-2. 🔌 Connect ATSAMD21 microphone to GPIO 6 & 7
-3. 🧪 Test and tune for your specific microphone
-
----
-
-## Next Steps
-
-### Optional Enhancements
-1. **Multi-stage Filtering**
-   - Add IIR or FIR post-processing filter
-   - Implement low-pass for anti-aliasing
-   - Notch filter for 50/60 Hz hum
-
-2. **Automatic Gain Control (AGC)**
-   - Normalize audio level
-   - Prevent clipping on loud inputs
-
-3. **Multiple Consumers**
-   - Add mutex for shared buffer access
-   - Stream to speaker, wireless, storage, ML model
-
-4. **Stereo Recording**
-   - Use PIO1 with different pins
-   - Synchronize both channels
-
-5. **Real-Time Analysis**
-   - FFT for frequency spectrum
-   - MFCC for speech recognition
-   - Pitch detection
-
----
-
-## Reference Files
-
-| File | Purpose |
-|------|---------|
-| [microphone.h](src/microphone.h) | API, global variables, configuration |
-| [microphone.c](src/microphone.c) | PIO/DMA hardware, PDM→PCM algorithm |
-| [pdm_microphone.pio](src/pdm_microphone.pio) | PIO assembly code |
-| [audio_consumer.c](src/audio_consumer.c) | Simple example consumer |
-| [audio_dsp_example.c](src/audio_dsp_example.c) | Advanced example (noise gate) |
-| [MICROPHONE_README.md](MICROPHONE_README.md) | Detailed technical docs |
-
----
-
-## Support & Debugging
-
-Enable detailed logging by uncommenting in microphone.c:
 ```c
-// Existing checks already log to printf()
-// Monitor UART output to diagnose issues
+// Inside your consumer task
+if (xSemaphoreTake(g_audioReadySemaphore, pdMS_TO_TICKS(50)) == pdFAIL) {
+    printf("No audio available (timeout)\n");
+}
 ```
 
-Key debug outputs:
+---
+
+## Performance Characteristics
+
+### Timing
+
+| Operation | Time | Notes |
+|-----------|------|-------|
+| DMA Fill | ~1 ms | 384 bytes @ 3.072 MHz parallel input |
+| Filter 48 samples | ~50-100 µs | Open_PDM_Filter_64 call |
+| 11 filter calls | ~500-1100 µs | Per buffer accumulation |
+| Buffer switch latency | <1 µs | Atomic pointer swap |
+| Semaphore post | <1 µs | From ISR |
+| Semaphore take/check | <10 µs | Kernel operation |
+
+### Memory Usage
+
 ```
-Microphone Task Started           ← Task created
-Initializing microphone system... ← Initialization
-PIO initialized                   ← PIO ready
-DMA initialized                   ← DMA ready
-Buffer 1 ready                    ← Data ready (check consumer)
-[Mic] Buffer 1 full               ← Buffer produced
-Processing buffer 1: RMS=...      ← Consumer processed
+DMA Buffers:     768 bytes  (2 × 96 words)
+PCM Buffers:   2,048 bytes  (2 × 1024 int16_t)
+Filter State:  ~500 bytes   (FIR history)
+Semaphore:     ~100 bytes   (FreeRTOS handle)
+─────────────────────────────
+Total:        ~3.5 KB
 ```
+
+### CPU Usage (Approximate)
+
+- **Microphone Task**: 5-10% when active, idle otherwise
+- **Consumer Task**: Depends on your processing
+- **Both Idle**: When no buffer ready (event-driven)
+
+---
+
+## Troubleshooting
+
+### Issue: Semaphore Never Fires
+
+**Cause:** Microphone task not reaching buffer-full condition
+
+**Debug:**
+```c
+g_micDebug = 2;
+// Look for: [Mic] Buffer X full
+// If not appearing, check DMA completion
+```
+
+**Solution:**
+- Verify DMA channel allocated
+- Check GPIO6/7 connected to microphone
+- Verify PDM clock running (oscilloscope on GPIO7)
+
+### Issue: Partial Buffers
+
+**Cause:** Consumer reads buffer mid-fill
+
+**Fix (already in code):**
+- Use semaphore (guarantees complete buffers only)
+- Never read g_audioBuffers directly
+- Always wait on g_audioReadySemaphore first
+
+### Issue: Audio Glitches
+
+**Cause:** Buffer overrun (consumer too slow)
+
+**Debug:**
+```c
+extern uint32_t g_audio_samples_dropped;  // Check this
+printf("Dropped samples: %lu\n", g_audio_samples_dropped);
+```
+
+**Solution:**
+- Reduce consumer task processing time
+- Increase consumer task priority
+- Use ring buffer pattern for buffering
+
+---
+
+## References
+
+- [microphone.h](src/microphone.h) - Full API
+- [IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md) - System architecture
+- [HARDWARE_WIRING.md](HARDWARE_WIRING.md) - GPIO pinouts
 

@@ -84,7 +84,7 @@ add_custom_target(generate_lut ALL DEPENDS "${LUT_PARAMS_H}")
 set(SOURCES
     src/main.c
     src/st7789.c
-    # src/trustzone_stubs.c
+    src/trustzone_stubs.c
     src/parser.c
     src/widgets.c
     src/microphone.c
