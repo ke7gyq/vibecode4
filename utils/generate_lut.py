@@ -244,6 +244,51 @@ class OpenPDMFilterLUTGenerator:
             f.write('};\n\n')
             
             # Write coefficient array (for reference/debugging)
+            # Write sinc intermediate arrays (needed for OpenPDMFilter_Init when USE_CONST_LUT=1)
+            f.write('/* Intermediate sinc arrays for filter initialization */\n')
+            f.write(f'const uint32_t sinc1[{self.DECIMATION_MAX}] = {{\n')
+            for i in range(self.DECIMATION_MAX):
+                if i < self.decimation:
+                    f.write('    1')
+                else:
+                    f.write('    0')
+                if i < self.DECIMATION_MAX - 1:
+                    f.write(',')
+                if (i + 1) % 16 == 0:
+                    f.write('\n')
+                else:
+                    f.write(' ')
+            f.write('};\n\n')
+            
+            f.write(f'const uint32_t sinc2[{self.DECIMATION_MAX * 2}] = {{\n')
+            for i in range(self.DECIMATION_MAX * 2):
+                if i < len(self.sinc2):
+                    f.write(f'    {self.sinc2[i]}')
+                else:
+                    f.write('    0')
+                if i < self.DECIMATION_MAX * 2 - 1:
+                    f.write(',')
+                if (i + 1) % 8 == 0:
+                    f.write('\n')
+                else:
+                    f.write(' ')
+            f.write('};\n\n')
+            
+            f.write(f'const uint32_t sinc[{self.DECIMATION_MAX * self.SINCN}] = {{\n')
+            for i in range(self.DECIMATION_MAX * self.SINCN):
+                if i < len(self.sinc):
+                    f.write(f'    {self.sinc[i]}')
+                else:
+                    f.write('    0')
+                if i < self.DECIMATION_MAX * self.SINCN - 1:
+                    f.write(',')
+                if (i + 1) % 8 == 0:
+                    f.write('\n')
+                else:
+                    f.write(' ')
+            f.write('};\n\n')
+            
+            # Write Sinc³ coefficients: coef[SINCN][DECIMATION]
             f.write('/* Sinc³ coefficients: coef[SINCN][DECIMATION] */\n')
             f.write('const int32_t coef[3][64] = {\n')
             for s in range(self.SINCN):

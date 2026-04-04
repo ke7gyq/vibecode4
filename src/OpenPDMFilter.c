@@ -51,12 +51,16 @@
 
 uint32_t div_const = 0;
 int64_t sub_const = 0;
+
+/* When USE_CONST_LUT=1, these are imported from LUT_Params.h as const arrays.
+   When USE_CONST_LUT=0, they are computed at runtime on the global heap. */
+#if !USE_CONST_LUT
 uint32_t sinc[DECIMATION_MAX * SINCN];
 uint32_t sinc1[DECIMATION_MAX];
 uint32_t sinc2[DECIMATION_MAX * 2];
-#if !USE_CONST_LUT
 uint32_t coef[SINCN][DECIMATION_MAX];
 #endif
+
 #if defined(USE_LUT) && !USE_CONST_LUT
 int32_t lut[256][DECIMATION_MAX / 8][SINCN];
 #endif
@@ -189,20 +193,33 @@ void Open_PDM_Filter_Init(TPDMFilter_InitStruct *Param)
     Param->Coef[i] = 0;
     Param->bit[i] = 0;
   }
-  for (i = 0; i < decimation; i++) {
-    sinc1[i] = 1;
-  }
- 
+
   Param->OldOut = Param->OldIn = Param->OldZ = 0;
   Param->LP_ALFA = (Param->LP_HZ != 0 ? (uint16_t) (Param->LP_HZ * 256 / (Param->LP_HZ + Param->Fs / (2 * 3.14159))) : 0);
   Param->HP_ALFA = (Param->HP_HZ != 0 ? (uint16_t) (Param->Fs * 256 / (2 * 3.14159 * Param->HP_HZ + Param->Fs)) : 0);
  
-  Param->FilterLen = decimation * SINCN;       
+  Param->FilterLen = decimation * SINCN;
+
+#if USE_CONST_LUT
+  /* When using pre-computed const LUT from LUT_Params.h:
+     - sinc, sinc1, sinc2 arrays are already in ROM
+     - coef array is already in ROM
+     - div_const and sub_const are pre-computed constants
+     No computation needed, just use the pre-computed values */
+  div_const = LUT_DIV_CONST;
+  sub_const = LUT_SUB_CONST;
+
+#else
+  /* When NOT using const LUT: compute everything at runtime */
+  for (i = 0; i < decimation; i++) {
+    sinc1[i] = 1;
+  }
+  
   sinc[0] = 0;
   sinc[decimation * SINCN - 1] = 0;      
   convolve(sinc1, decimation, sinc1, decimation, sinc2);
-  convolve(sinc2, decimation * 2 - 1, sinc1, decimation, &sinc[1]);     
-#if !USE_CONST_LUT
+  convolve(sinc2, decimation * 2 - 1, sinc1, decimation, &sinc[1]);
+  
   for(j = 0; j < SINCN; j++) {
     for (i = 0; i < decimation; i++) {
       coef[j][i] = sinc[j * decimation + i];
@@ -213,13 +230,8 @@ void Open_PDM_Filter_Init(TPDMFilter_InitStruct *Param)
   sub_const = sum >> 1;
   div_const = sub_const * Param->MaxVolume / 32768 / FILTER_GAIN;
   div_const = (div_const == 0 ? 1 : div_const);
-#else
-  /* When using const LUT, use pre-computed constants from LUT_Params.h */
-  div_const = LUT_DIV_CONST;
-  sub_const = LUT_SUB_CONST;
-#endif
- 
-#if defined(USE_LUT) && !USE_CONST_LUT
+
+#if defined(USE_LUT)
   /* Look-Up Table - computed dynamically at runtime. */
   uint16_t c, d, s;
   for (s = 0; s < SINCN; s++)
@@ -236,8 +248,7 @@ void Open_PDM_Filter_Init(TPDMFilter_InitStruct *Param)
                        ((c >> 1) & 0x01) * coef_p[d * 8 + 6] +
                        ((c     ) & 0x01) * coef_p[d * 8 + 7];
   }
-#elif USE_CONST_LUT
-  /* Look-Up Table - using pre-computed const values from LUT_Params.h */
+#endif
 #endif
 }
  
