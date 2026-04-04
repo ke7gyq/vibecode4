@@ -1,13 +1,22 @@
-# OpenPDM2PCM LUT Generator
+# Vibecode4 Audio Utilities
 
 ## Overview
 
-This directory contains Python utilities for the OpenPDM2PCM audio filter used in the vibecode4 project.
+This directory contains Python utilities for audio capture, testing, and analysis in the vibecode4 project.
 
 ### Files
 
+**Audio Capture & Streaming:**
+- **udp_audio_client.py** - Receives audio from Pico via UDP, saves to WAV file
+- **telnet_pcm_client.py** - Real-time PCM level monitoring via Telnet
+
+**Audio Testing & Analysis:**
+- **playTone.py** - Generates 440 Hz reference tone (useful for pitch testing)
+- **analyzePitch.py** - FFT-based pitch detection (verifies audio quality and sampling rate)
+
+**Filter Configuration:**
 - **generate_lut.py** - Python script that generates Look-Up Table (LUT) values for the OpenPDM2PCM filter
-- **LUT_Params.h** - Auto-generated C header file containing the pre-calculated LUT values (may be outdated; regenerate during build)
+- **LUT_Params.h** - Auto-generated C header file containing the pre-calculated LUT values (regenerated during build)
 
 ## ⚠️ Important: Auto-Generated During Build
 

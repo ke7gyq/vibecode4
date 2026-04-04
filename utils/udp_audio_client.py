@@ -17,7 +17,7 @@ def main():
     parser.add_argument('--port', type=int, default=5001, help='UDP audio port')
     parser.add_argument('--output', default='audio.wav', help='Output WAV file')
     parser.add_argument('--duration', type=int, default=30, help='Capture duration in seconds')
-    parser.add_argument('--sample-rate', type=int, default=42496, help='Expected sample rate (Hz)')
+    parser.add_argument('--sample-rate', type=int, default=48000, help='Expected sample rate (Hz)')
     parser.add_argument('--frame-size', type=int, default=528, help='Samples per frame')
     
     args = parser.parse_args()

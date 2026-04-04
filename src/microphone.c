@@ -68,12 +68,17 @@ volatile uint8_t g_audioReady = 0;
 AudioBuffers_t g_audioBuffers;
 uint8_t g_micDebug = 0;  /* Microphone debug level: 0=OFF, 2+=ON */
 
+/* Binary semaphore signaled when audio buffer is ready */
+SemaphoreHandle_t g_audioReadySemaphore = NULL;
+
 /* Microphone state */
 static bool g_microphone_initialized = false;
 static PIO g_pio = NULL;
 static uint g_sm = 0;
 static uint g_dma_ch = 0;
-static TaskHandle_t g_microphone_task_handle = NULL;  /* Handle for DMA ISR to notify */  
+static TaskHandle_t g_microphone_task_handle = NULL;  /* Handle for DMA ISR to notify */
+static uint32_t *g_current_dma_buffer = NULL;  /* Current buffer being filled */
+static uint32_t *g_other_dma_buffer = NULL;    /* Next buffer to fill */  
 
 /* DMA buffers - ping-pong pair for alternating fills */
 static uint32_t g_dma_buffer_a[DMA_BUFFER_WORDS];  /* 96 words = 384 bytes */
@@ -101,11 +106,21 @@ static TPDMFilter_InitStruct g_pdm_filter_config = {0};
 /* ==================== DMA Interrupt Handler (for microphone task) ==================== */
 /**
  * DMA interrupt handler for microphone task's DMA channel
- * Signals the microphone task that a buffer fill is complete using task notification
+ * Immediately re-triggers DMA (pipelining) then notifies task
+ * This allows DMA to fill buffer B while task filters buffer A
  */
 static void microphone_dma_irq_handler(void) {
     /* Clear interrupt flag */
     dma_hw->ints0 = (1u << g_dma_ch);
+    
+    /* PIPELINING: Re-trigger DMA immediately in ISR
+     * This starts filling the other buffer NOW, overlapping with task's filtering work
+     */
+    uint32_t *temp = g_current_dma_buffer;
+    g_current_dma_buffer = g_other_dma_buffer;
+    g_other_dma_buffer = temp;
+    
+    dma_channel_transfer_to_buffer_now(g_dma_ch, g_other_dma_buffer, DMA_BUFFER_WORDS);
     
     /* Notify the microphone task that DMA is complete */
     if (g_microphone_task_handle != NULL) {
@@ -427,6 +442,11 @@ void microphone_task(void *parameters)
 #if USE_REAL_MICROPHONE
         /* Wait for DMA completion notification (blocking, allows other tasks to run) */
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        
+        /* Sync buffer pointers from global state (ISR has already done the swap and re-triggered DMA) */
+        current_dma_buffer = g_current_dma_buffer;
+        other_dma_buffer = g_other_dma_buffer;
+        
         {
             /* DMA has completed - process the buffer */
             uint8_t *pdm_bytes = (uint8_t *)current_dma_buffer;
@@ -453,6 +473,13 @@ void microphone_task(void *parameters)
                            current_buffer, pcm_index, buffer_count);
                 }
                 
+                /* Signal semaphore to wake UDP task */
+                if (g_audioReadySemaphore != NULL) {
+                    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+                    xSemaphoreGiveFromISR(g_audioReadySemaphore, &xHigherPriorityTaskWoken);
+                    /* Note: called from task, not ISR, but good practice */
+                }
+                
                 current_buffer = (current_buffer == 1) ? 2 : 1;
                 p_current_buffer = (current_buffer == 1) ? 
                                   g_audioBuffers.buffer1 : g_audioBuffers.buffer2;
@@ -473,17 +500,6 @@ void microphone_task(void *parameters)
                 }
             }
             
-            /* Swap buffer pointers for next iteration */
-            uint32_t *temp = current_dma_buffer;
-            current_dma_buffer = other_dma_buffer;
-            other_dma_buffer = temp;
-            
-            /* Re-trigger DMA for next buffer fill */
-            dma_channel_transfer_to_buffer_now(
-                g_dma_ch,
-                other_dma_buffer,           /* Fill the other buffer now */
-                DMA_BUFFER_WORDS
-            );
         }  /* End of DMA notification block */
 #else
         /* Test mode */
@@ -543,6 +559,18 @@ bool microphone_init(void)
     /* Initialize buffers */
     memset(&g_audioBuffers, 0, sizeof(g_audioBuffers));
     g_audioReady = 0;
+    
+    /* Create binary semaphore for audio ready notifications */
+    g_audioReadySemaphore = xSemaphoreCreateBinary();
+    if (g_audioReadySemaphore == NULL) {
+        printf("ERROR: Failed to create audio ready semaphore\n");
+        return false;
+    }
+    printf("Audio ready semaphore created\n");
+    
+    /* Initialize DMA buffer pointers for pipelining */
+    g_current_dma_buffer = g_dma_buffer_a;
+    g_other_dma_buffer = g_dma_buffer_b;
     
     /* Initialize PIO */
     if (!pio_init_pdm()) {
@@ -635,7 +663,11 @@ void initialize_pdm_clock(void)
     /* Clock divider: sys_clk / (PDM_freq * cycles_per_period)
      * PDM_freq = PCM_SAMPLE_RATE_HZ * DECIMATION_RATIO = 3.072 MHz
      * cycles_per_period = 4 (2 low + 2 high) */
-    float clk_div = clock_get_hz(clk_sys) / (float)(PCM_SAMPLE_RATE_HZ * DECIMATION_RATIO * 4);
+    uint32_t sys_clock_hz = clock_get_hz(clk_sys);
+    float target_pdm_hz = (float)(PCM_SAMPLE_RATE_HZ * DECIMATION_RATIO);
+    float clk_div = sys_clock_hz / (target_pdm_hz * 4);
+    float actual_pdm_hz = sys_clock_hz / (clk_div * 4);
+    
     uint offset = pio_add_program(pio, &pdm_clock_program);
     printf("[PDM Clock Init] PIO program loaded at offset %u\n", offset);
 
@@ -644,7 +676,10 @@ void initialize_pdm_clock(void)
     pio_sm_set_enabled(pio, sm, true);
     
     printf("[PDM Clock Init] GPIO6 reads data (input)\n");
-    printf("[PDM Clock Init] GPIO7 generates PDM clock at 3.06 MHz (clk_div=%.4f)\n", clk_div);
+    printf("[PDM Clock Init] System clock: %lu Hz\n", sys_clock_hz);
+    printf("[PDM Clock Init] Target PDM: %.0f Hz (3.072 MHz)\n", target_pdm_hz);
+    printf("[PDM Clock Init] Clock divider: %.6f\n", clk_div);
+    printf("[PDM Clock Init] Actual PDM: %.0f Hz (%.2f%% error)\n", actual_pdm_hz, ((actual_pdm_hz / target_pdm_hz) - 1.0) * 100);
     printf("[PDM Clock Init] Clock runs continuously - no shutdown needed\n");
     printf("[PDM Clock Init] Running initialization test for 5 seconds...\n");
     

@@ -30,80 +30,29 @@ static udp_client_t g_udp_clients[MAX_CLIENTS];
 
 /* ==================== Audio Server (UDP Port 5001) ==================== */
 
-// Audio transmission via UDP - timer-based
-#define FRAME_SAMPLES 528       /* Send full audio buffer per frame (AUDIO_BUFFER_SIZE) */
-#define FRAME_BYTES (FRAME_SAMPLES * sizeof(int16_t))
-static struct repeating_timer g_audio_timer;
-static TaskHandle_t g_udp_audio_task_handle = NULL;  // UDP audio task handle
+/* Audio transmission - semaphore-driven (event-based from microphone) */
+static TaskHandle_t g_udp_audio_task_handle = NULL;  /* UDP audio task handle */
 
-/* Audio buffer read tracking - prevent reading stale buffers */
-static uint8_t g_current_buffer_being_read = 0;      // Which buffer we're currently reading from
-static int16_t g_frame_send_buffer[FRAME_SAMPLES];   /* Reusable frame buffer (avoid stack overflow) */
+/* Current buffer being transmitted */
+static uint8_t g_current_buffer_being_sent = 0;      /* Which buffer we're sending (1 or 2) */
 
-// Stats tracking
-static uint32_t g_timer_calls = 0;
-static uint32_t g_timer_samples_sent = 0;
-static uint32_t g_timer_samples_dropped = 0;
-static uint32_t g_timer_last_stats_time = 0;
+/* Stats tracking */
+static uint32_t g_audio_frames_sent = 0;
+static uint32_t g_audio_samples_sent = 0;
+static uint32_t g_audio_samples_dropped = 0;
+static uint32_t g_audio_last_stats_time = 0;
 
-// Timer interrupt handler - notify audio task
-static bool audio_timer_interrupt(struct repeating_timer *t) {
-    /* Only process frames if server is running */
-    if (!g_server_running) {
-        return true;
-    }
-    
-    if (g_udp_audio_task_handle != NULL) {
-        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-        vTaskNotifyGiveFromISR(g_udp_audio_task_handle, &xHigherPriorityTaskWoken);
-        portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
-    }
-    g_timer_calls++;
-    return true;
-}
-
-// Send audio frame to all active clients via UDP
-// Uses real microphone buffer instead of synthetic data
-static void udp_audio_send_frame(void) {
-    // Safety: don't process frames if no buffer is ready yet
-    // (prevents accessing uninitialized g_audioBuffers)
-    if (g_audioReady == 0) {
-        if (g_timer_calls % 100 == 0 && g_micDebug) {
-            printf("[UDP] Waiting for audio buffer (g_audioReady=%d)...\n", g_audioReady);
-        }
-        return;  // Still waiting for first buffer from microphone
-    }
-    
-    // Track which buffer we're reading to detect buffer switches
-    if (g_audioReady != g_current_buffer_being_read) {
-        g_current_buffer_being_read = g_audioReady;
-        if (g_micDebug) {
-            printf("[UDP] Buffer switch: now reading from buffer %d\n", g_current_buffer_being_read);
-        }
-    }
-    
-    // Get current microphone buffer pointer
-    int16_t *mic_buffer = NULL;
-    if (g_current_buffer_being_read == 1) {
-        mic_buffer = g_audioBuffers.buffer1;
-    } else if (g_current_buffer_being_read == 2) {
-        mic_buffer = g_audioBuffers.buffer2;
-    } else {
-        // Should not happen (g_audioReady should be 1 or 2)
-        g_timer_samples_dropped += FRAME_SAMPLES;
+/* Send audio frame to all active clients via UDP
+ * Zero-copy implementation: uses PBUF_REF to point directly to audio buffer
+ * Safe because double-buffering ensures buffer isn't modified while sending
+ */
+static void udp_audio_send_frame(int16_t *buffer) {
+    if (buffer == NULL) {
+        g_audio_samples_dropped += AUDIO_BUFFER_SIZE;
         return;
     }
     
-    // Copy FRAME_SAMPLES from start of current buffer
-    int samples_to_copy = (FRAME_SAMPLES <= AUDIO_BUFFER_SIZE) ? FRAME_SAMPLES : AUDIO_BUFFER_SIZE;
-    memcpy(g_frame_send_buffer, mic_buffer, samples_to_copy * sizeof(int16_t));
-    
-    // Pad with zeros if necessary
-    if (samples_to_copy < FRAME_SAMPLES) {
-        memset(&g_frame_send_buffer[samples_to_copy], 0, (FRAME_SAMPLES - samples_to_copy) * sizeof(int16_t));
-    }
-    
-    // Send to all active UDP clients
+    /* Send to all active UDP clients */
     for (int i = 0; i < MAX_CLIENTS; i++) {
         udp_client_t *client = &g_udp_clients[i];
         
@@ -111,57 +60,60 @@ static void udp_audio_send_frame(void) {
             continue;
         }
         
-        if (g_micDebug >= 2 && g_timer_calls % 50 == 0) {
-            printf("[UDP] Sending frame to client %d\n", i);
+        if (g_micDebug >= 2) {
+            printf("[UDP] Sending %d samples to client %d\n", AUDIO_BUFFER_SIZE, i);
         }
         
-        // Create pbuf for this frame
-        struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, FRAME_BYTES, PBUF_RAM);
+        /* Create pbuf that references existing buffer (zero-copy) */
+        uint32_t frame_bytes = AUDIO_BUFFER_SIZE * sizeof(int16_t);
+        struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, frame_bytes, PBUF_REF);
         if (p == NULL) {
-            // Out of memory - skip this frame
-            g_timer_samples_dropped += FRAME_SAMPLES;
+            /* Out of memory - skip this frame */
+            g_audio_samples_dropped += AUDIO_BUFFER_SIZE;
             if (g_micDebug) {
-                printf("[UDP] ERROR: pbuf_alloc failed for client %d\n", i);
+                printf("[UDP] ERROR: pbuf_alloc (REF) failed for client %d\n", i);
             }
             continue;
         }
         
-        // Copy frame data into pbuf
-        memcpy(p->payload, (const void *)g_frame_send_buffer, FRAME_BYTES);
+        /* Point directly to existing buffer - NO memcpy */
+        p->payload = (void *)buffer;
         
-        // Send UDP packet to client
+        /* Send UDP packet to client */
         err_t err = udp_sendto(audio_pcb, p, &client->addr, client->port);
         
-        // Free pbuf (udp_sendto doesn't own it)
+        /* Free pbuf header only (buffer remains in place) */
         pbuf_free(p);
         
         if (err != ERR_OK) {
-            g_timer_samples_dropped += FRAME_SAMPLES;
+            g_audio_samples_dropped += AUDIO_BUFFER_SIZE;
             if (g_micDebug) {
                 printf("[UDP] ERROR: udp_sendto failed (err=%d) for client %d\n", err, i);
             }
             continue;
         }
         
-        // Success
-        client->samples_sent += FRAME_SAMPLES;
-        g_timer_samples_sent += FRAME_SAMPLES;
+        /* Success */
+        client->samples_sent += AUDIO_BUFFER_SIZE;
+        g_audio_samples_sent += AUDIO_BUFFER_SIZE;
     }
     
-    // Print stats every second (debug only)
+    g_audio_frames_sent++;
+    
+    /* Print stats every second (debug only) */
     uint32_t now = to_ms_since_boot(get_absolute_time());
-    if (now - g_timer_last_stats_time >= 1000) {
-        uint32_t ms_elapsed = now - g_timer_last_stats_time;
-        float rate = (g_timer_samples_sent * 1000.0f) / ms_elapsed;
-        float drop_rate = (g_timer_samples_dropped * 1000.0f) / ms_elapsed;
-        float timer_hz = (g_timer_calls * 1000.0f) / ms_elapsed;
+    if (now - g_audio_last_stats_time >= 1000) {
+        uint32_t ms_elapsed = now - g_audio_last_stats_time;
+        float rate = (g_audio_samples_sent * 1000.0f) / ms_elapsed;
+        float drop_rate = (g_audio_samples_dropped * 1000.0f) / ms_elapsed;
+        float frame_hz = (g_audio_frames_sent * 1000.0f) / ms_elapsed;
         if (g_micDebug) {
-            printf("[AudioRate] TX: %.0f Hz, DROP: %.0f Hz (%.0f IRQs/sec)\n", rate, drop_rate, timer_hz);
+            printf("[AudioRate] TX: %.0f Hz, DROP: %.0f Hz (%.1f frames/sec)\n", rate, drop_rate, frame_hz);
         }
-        g_timer_samples_sent = 0;
-        g_timer_samples_dropped = 0;
-        g_timer_calls = 0;
-        g_timer_last_stats_time = now;
+        g_audio_samples_sent = 0;
+        g_audio_samples_dropped = 0;
+        g_audio_frames_sent = 0;
+        g_audio_last_stats_time = now;
     }
 }
 
@@ -203,18 +155,60 @@ static void udp_recv_callback(void *arg, struct udp_pcb *pcb, struct pbuf *p,
     pbuf_free(p);
 }
 
-// Audio task - waits for timer notifications and sends frames
+/* Audio task - waits for semaphore from microphone when buffer is ready */
 void udp_audio_task(void *parameters) {
     printf("UDP Audio Task Started\n");
     
     g_udp_audio_task_handle = xTaskGetCurrentTaskHandle();
+    g_current_buffer_being_sent = 0;
     
     while (1) {
-        // Wait for notification with timeout
-        uint32_t ulNotificationValue = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(250));
+        /* Wait for semaphore from microphone task (signaled when buffer ready) */
+        BaseType_t result = xSemaphoreTake(g_audioReadySemaphore, pdMS_TO_TICKS(1000));
         
-        if (ulNotificationValue > 0) {
-            udp_audio_send_frame();
+        if (result == pdTRUE) {
+            /* Semaphore taken - audio data is ready */
+            
+            /* Determine which buffer is ready */
+            uint8_t ready_buffer = g_audioReady;
+            if (ready_buffer == 0) {
+                /* Stale semaphore or race condition */
+                if (g_micDebug) {
+                    printf("[UDP] Warning: semaphore taken but no buffer ready\n");
+                }
+                continue;
+            }
+            
+            /* Track buffer switch */
+            if (ready_buffer != g_current_buffer_being_sent) {
+                g_current_buffer_being_sent = ready_buffer;
+                if (g_micDebug) {
+                    printf("[UDP] Sending buffer %d\n", g_current_buffer_being_sent);
+                }
+            }
+            
+            /* Get pointer to ready buffer */
+            int16_t *buffer_to_send = NULL;
+            if (ready_buffer == 1) {
+                buffer_to_send = g_audioBuffers.buffer1;
+            } else if (ready_buffer == 2) {
+                buffer_to_send = g_audioBuffers.buffer2;
+            } else {
+                g_audio_samples_dropped += AUDIO_BUFFER_SIZE;
+                if (g_micDebug) {
+                    printf("[UDP] ERROR: Invalid buffer ready state: %d\n", ready_buffer);
+                }
+                continue;
+            }
+            
+            /* Send the complete buffer */
+            udp_audio_send_frame(buffer_to_send);
+            
+        } else {
+            /* Timeout waiting for semaphore */
+            if (g_server_running && g_micDebug) {
+                printf("[UDP] Timeout waiting for audio buffer (server running)\n");
+            }
         }
     }
 }
@@ -229,20 +223,20 @@ int udp_server_start(void) {
     
     printf("UDP Audio Server: Starting on port %d...\n", UDP_AUDIO_PORT);
     
-    // Initialize client array
+    /* Initialize client array */
     memset(g_udp_clients, 0, sizeof(g_udp_clients));
     
-    // Reset buffer read tracking
-    g_current_buffer_being_read = 0;
+    /* Reset buffer tracking */
+    g_current_buffer_being_sent = 0;
     
-    // If PCB already exists from previous run, clean it up
+    /* If PCB already exists from previous run, clean it up */
     if (audio_pcb != NULL) {
         printf("UDP Audio Server: Cleaning up old PCB\n");
         udp_remove(audio_pcb);
         audio_pcb = NULL;
     }
     
-    // Create UDP PCB
+    /* Create UDP PCB */
     printf("UDP Audio Server: Creating UDP PCB...\n");
     audio_pcb = udp_new();
     if (audio_pcb == NULL) {
@@ -251,7 +245,7 @@ int udp_server_start(void) {
     }
     printf("UDP Audio Server: PCB created successfully\n");
     
-    // Bind to port
+    /* Bind to port */
     printf("UDP Audio Server: Binding to port %d...\n", UDP_AUDIO_PORT);
     if (udp_bind(audio_pcb, IP_ADDR_ANY, UDP_AUDIO_PORT) != ERR_OK) {
         printf("UDP Audio Server: ERROR - Failed to bind to port\n");
@@ -261,23 +255,13 @@ int udp_server_start(void) {
     }
     printf("UDP Audio Server: Successfully bound to port %d\n", UDP_AUDIO_PORT);
     
-    // Set receive callback to track clients
+    /* Set receive callback to track clients */
     printf("UDP Audio Server: Setting recv callback...\n");
     udp_recv(audio_pcb, udp_recv_callback, NULL);
     
     printf("UDP Audio Server: Listening on port %d (send UDP packet to register)\n", UDP_AUDIO_PORT);
-    
-    // Start audio transmission timer: fires every 12ms = 83 Hz
-    // 83 Hz * 528 samples/frame = 43,824 samples/sec ≈ 43.8 kHz throughput
-    // UDP handles this rate without backpressure issues TCP had
-    printf("UDP Audio Server: Starting 12ms timer...\n");
-    if (!add_repeating_timer_ms(12, audio_timer_interrupt, NULL, &g_audio_timer)) {
-        printf("UDP Audio Server: ERROR - Failed to create timer\n");
-        udp_remove(audio_pcb);
-        audio_pcb = NULL;
-        return -1;
-    }
-    printf("UDP Audio Server: Timer started (12ms = 83 Hz, 43.8 kHz throughput)\n");
+    printf("UDP Audio Server: Using semaphore-driven flow (event-based from microphone)\n");
+    printf("UDP Audio Server: Sending %d samples per buffer\n", AUDIO_BUFFER_SIZE);
     
     g_server_running = 1;
     printf("UDP Audio Server: Started - Python client should send to port %d\n", UDP_AUDIO_PORT);
@@ -290,7 +274,7 @@ void udp_server_stop(void) {
         return;
     }
     
-    cancel_repeating_timer(&g_audio_timer);
+    /* No timer to cancel with semaphore-driven approach */
     
     if (audio_pcb != NULL) {
         udp_remove(audio_pcb);
