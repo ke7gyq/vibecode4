@@ -71,6 +71,13 @@ uint8_t g_micDebug = 0;  /* Microphone debug level: 0=OFF, 2+=ON */
 /* Binary semaphore signaled when audio buffer is ready */
 SemaphoreHandle_t g_audioReadySemaphore = NULL;
 
+/* Message queues for audio buffer distribution */
+QueueHandle_t g_audioQueueUDP = NULL;
+QueueHandle_t g_audioQueueWaterfall = NULL;
+
+/* Message sequence counter - incremented with each buffer ready notification */
+static uint32_t g_audioMessageSequence = 0;
+
 /* Microphone state */
 static bool g_microphone_initialized = false;
 static PIO g_pio = NULL;
@@ -266,6 +273,14 @@ void pdm_microphone_set_filter_max_volume(uint8_t max_volume) {
  */
 void pdm_microphone_set_filter_gain(uint8_t gain) {
     g_pdm_mic.filter.Gain = gain;
+    printf("[Microphone] Filter gain set to: %u\n", gain);
+}
+
+/**
+ * Get current filter gain
+ */
+uint8_t pdm_microphone_get_filter_gain(void) {
+    return g_pdm_mic.filter.Gain;
 }
 
 /**
@@ -473,11 +488,45 @@ void microphone_task(void *parameters)
                            current_buffer, pcm_index, buffer_count);
                 }
                 
-                /* Signal semaphore to wake UDP task */
+                /* Send message to both consumer queues */
+                /* Each queue gets an independent copy - no starvation possible */
+                AudioBufferMessage_t msg = {
+                    .buffer_id = current_buffer,
+                    .sequence = g_audioMessageSequence++,
+                    .buffer_ptr = p_current_buffer,
+                    .sample_count = pcm_index,
+                    .timestamp_ms = to_ms_since_boot(get_absolute_time())
+                };
+                
+                BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+                
+                /* Queue for UDP task */
+                if (g_audioQueueUDP != NULL) {
+                    if (xQueueSendFromISR(g_audioQueueUDP, &msg, &xHigherPriorityTaskWoken) == errQUEUE_FULL) {
+                        if (g_micDebug >= 1) {
+                            printf("[Mic] WARNING: UDP queue FULL (seq=%lu dropped)\n", msg.sequence);
+                        }
+                    } else if (g_micDebug >= 2) {
+                        printf("[Mic-ISR] UDP← seq=%lu buf=%u %u.%u ms\n", 
+                               msg.sequence, msg.buffer_id, msg.timestamp_ms/1000, msg.timestamp_ms%1000);
+                    }
+                }
+                
+                /* Queue for Waterfall task */
+                if (g_audioQueueWaterfall != NULL) {
+                    if (xQueueSendFromISR(g_audioQueueWaterfall, &msg, &xHigherPriorityTaskWoken) == errQUEUE_FULL) {
+                        if (g_micDebug >= 1) {
+                            printf("[Mic] WARNING: Waterfall queue FULL (seq=%lu dropped)\n", msg.sequence);
+                        }
+                    } else if (g_micDebug >= 2) {
+                        printf("[Mic-ISR] WTF← seq=%lu buf=%u %u.%u ms\n",
+                               msg.sequence, msg.buffer_id, msg.timestamp_ms/1000, msg.timestamp_ms%1000);
+                    }
+                }
+                
+                /* Legacy semaphore signal for backward compatibility */
                 if (g_audioReadySemaphore != NULL) {
-                    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
                     xSemaphoreGiveFromISR(g_audioReadySemaphore, &xHigherPriorityTaskWoken);
-                    /* Note: called from task, not ISR, but good practice */
                 }
                 
                 current_buffer = (current_buffer == 1) ? 2 : 1;
@@ -560,13 +609,33 @@ bool microphone_init(void)
     memset(&g_audioBuffers, 0, sizeof(g_audioBuffers));
     g_audioReady = 0;
     
-    /* Create binary semaphore for audio ready notifications */
+    /* Create message queues for audio buffer distribution */
+    /* Queue depth: 4 messages (allows some buffering if consumer is slow) */
+    printf("[Mic] Initializing audio queue system...\n");
+    
+    g_audioQueueUDP = xQueueCreate(4, sizeof(AudioBufferMessage_t));
+    if (g_audioQueueUDP == NULL) {
+        printf("ERROR: Failed to create UDP audio queue\n");
+        return false;
+    }
+    printf("[Mic] UDP audio queue created (depth=4, msg_size=%u bytes)\n", 
+           (unsigned int)sizeof(AudioBufferMessage_t));
+    
+    g_audioQueueWaterfall = xQueueCreate(4, sizeof(AudioBufferMessage_t));
+    if (g_audioQueueWaterfall == NULL) {
+        printf("ERROR: Failed to create Waterfall audio queue\n");
+        return false;
+    }
+    printf("[Mic] Waterfall audio queue created (depth=4, msg_size=%u bytes)\n",
+           (unsigned int)sizeof(AudioBufferMessage_t));
+    
+    /* Legacy semaphore - kept for compatibility, but not used by new queue system */
     g_audioReadySemaphore = xSemaphoreCreateBinary();
     if (g_audioReadySemaphore == NULL) {
         printf("ERROR: Failed to create audio ready semaphore\n");
         return false;
     }
-    printf("Audio ready semaphore created\n");
+    printf("[Mic] Audio ready semaphore created (legacy compatibility)\n");
     
     /* Initialize DMA buffer pointers for pipelining */
     g_current_dma_buffer = g_dma_buffer_a;
@@ -577,16 +646,17 @@ bool microphone_init(void)
         printf("ERROR: Failed to initialize PIO\n");
         return false;
     }
-    printf("PIO initialized\n");
+    printf("[Mic] PIO initialized\n");
     
     /* Initialize DMA */
     if (!dma_init_pdm()) {
         printf("ERROR: Failed to initialize DMA\n");
         return false;
     }
-    printf("DMA initialized\n");
+    printf("[Mic] DMA initialized\n");
     
     g_microphone_initialized = true;
+    printf("[Mic] Microphone system ready (g_micDebug=%u)\n", g_micDebug);
     
     return true;
 }
@@ -605,6 +675,20 @@ uint8_t get_audio_ready(void)
 void clear_audio_ready(void)
 {
     g_audioReady = 0;
+}
+
+/**
+ * Get the current UDP audio queue depth for diagnostics
+ * Returns the number of pending audio buffers in the UDP processing queue
+ * 
+ * @return Number of messages in queue (0-4)
+ */
+UBaseType_t microphone_get_udp_queue_depth(void)
+{
+    if (g_audioQueueUDP == NULL) {
+        return 0;
+    }
+    return uxQueueMessagesWaiting(g_audioQueueUDP);
 }
 
 /* ==================== GPIO Toggle Test ==================== */

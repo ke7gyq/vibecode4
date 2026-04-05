@@ -9,6 +9,9 @@
 #include "widgets.h"
 #include "network.h"
 #include "tcp_server.h"
+#include "waterfall.h"
+#include "microphone.h"
+#include "spectrogram.h"
 
 /* External globals */
 extern SemaphoreHandle_t g_LvglMutex;
@@ -45,6 +48,43 @@ static uint8_t fnMicDebug(char *rest, void *v) {
     // Set the debug level
     g_micDebug = (uint8_t)debug_level;
     printf("Microphone debug level set to: %d\n", g_micDebug);
+    return 0;
+}
+
+/**
+ * Token function for the "micGain" command
+ * Gets or sets the microphone filter gain (1-16)
+ */
+static uint8_t fnMicGain(char *rest, void *v) {
+    (void)v;
+    
+    // Skip whitespace
+    while (*rest && isspace(*rest)) {
+        rest++;
+    }
+    
+    // If no arguments, return current value
+    if (*rest == '\0') {
+        printf("Current microphone gain: %u (range: 1-16)\n", pdm_microphone_get_filter_gain());
+        return 0;
+    }
+    
+    // Parse the gain value
+    uint32_t gain_value;
+    if (sscanf(rest, "%lu", &gain_value) != 1) {
+        printf("Error: micGain requires a numeric value (1-16)\n");
+        return 1;
+    }
+    
+    // Clamp to valid range
+    if (gain_value < 1 || gain_value > 16) {
+        printf("Error: micGain must be between 1 and 16\n");
+        return 1;
+    }
+    
+    // Set the gain
+    pdm_microphone_set_filter_gain((uint8_t)gain_value);
+    printf("Microphone gain set to: %u\n", (uint8_t)gain_value);
     return 0;
 }
 
@@ -363,6 +403,12 @@ static uint8_t fnRtosStatus(char *rest, void *v) {
     printf("Stack HWM in words. Multiply by %zu for bytes.\n", sizeof(StackType_t));
     printf("\n");
     
+    /* Display queue status */
+    printf("=== Audio Queue Status ===\n");
+    printf("UDP Queue Depth:       %u/4\n", microphone_get_udp_queue_depth());
+    printf("Waterfall Queue Depth: %u/4\n", waterfall_get_queue_depth());
+    printf("\n");
+    
     free(task_status_array);
     return 0;
 }
@@ -408,6 +454,121 @@ static uint8_t fnUdpStop(char *rest, void *v) {
 }
 
 /**
+ * Token function for the "enableWaterfall" command
+ * Creates a new waterfall display canvas and starts the waterfall task
+ * 
+ * @param rest Remainder of the command string (unused)
+ * @param v Void pointer for context (unused)
+ * @return 0 on success, non-zero on failure
+ */
+static uint8_t fnEnableWaterfall(char *rest, void *v) {
+    (void)rest;
+    (void)v;
+    
+    if (xSemaphoreTake(g_LvglMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        lv_obj_t *canvas = waterfall_init();
+        xSemaphoreGive(g_LvglMutex);
+        
+        if (canvas != NULL) {
+            printf("Waterfall display enabled\n");
+            return 0;
+        } else {
+            printf("Failed to enable waterfall display\n");
+            return 1;
+        }
+    } else {
+        printf("Failed to acquire LVGL mutex\n");
+        return 1;
+    }
+}
+
+/**
+ * Token function for the "disableWaterfall" command
+ * Destroys the waterfall display canvas and stops the waterfall task
+ * 
+ * @param rest Remainder of the command string (unused)
+ * @param v Void pointer for context (unused)
+ * @return 0 on success, non-zero on failure
+ */
+static uint8_t fnDisableWaterfall(char *rest, void *v) {
+    (void)rest;
+    (void)v;
+    
+    if (xSemaphoreTake(g_LvglMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        lv_obj_t *canvas = waterfall_get_canvas();
+        if (canvas != NULL) {
+            waterfall_destroy(canvas);
+            printf("Waterfall display disabled\n");
+        } else {
+            printf("Waterfall display not active\n");
+        }
+        xSemaphoreGive(g_LvglMutex);
+        return 0;
+    } else {
+        printf("Failed to acquire LVGL mutex\n");
+        return 1;
+    }
+}
+
+/**
+ * Token function for the "addWaterfall" command (DISABLED - for testing only)
+ * 
+ * @deprecated Use automatic spectrogram integration instead
+ */
+#if 0
+static uint8_t fnAddWaterfall(char *rest, void *v) {
+    (void)v;
+    
+    uint32_t freq_bin, color_idx;
+    
+    if (sscanf(rest, "%lu %lu", &freq_bin, &color_idx) != 2) {
+        printf("Usage: addWaterfall <freq_bin> <color_index>\n");
+        printf("  freq_bin: 0-15 (frequency band, 0=low, 15=high)\n");
+        printf("  color_index: 0-15 (amplitude, 0=dark blue, 15=bright yellow)\n");
+        return 1;
+    }
+    
+    if (freq_bin > 15) {
+        printf("Error: Frequency bin must be 0-15\n");
+        return 1;
+    }
+    
+    if (color_idx > 15) {
+        printf("Error: Color index must be 0-15\n");
+        return 1;
+    }
+    
+    lv_obj_t *canvas = waterfall_get_canvas();
+    if (canvas == NULL) {
+        printf("Error: Waterfall display not initialized. Use 'newWaterfall' first.\n");
+        return 1;
+    }
+    
+    /* Create waterfall bar with magnitude_sq values for all 16 frequency bins */
+    t_waterfallBar bar;
+    memset(&bar, 0, sizeof(bar));
+    
+    /* Fill frequencies below freq_bin with random colors for testing */
+    for (uint8_t i = 0; i < freq_bin; i++) {
+        uint8_t random_color = rand() % 16;  /* Random color 0-15 */
+        bar.magnitude_sq[i] = waterfall_color_index_to_magnitude_sq(random_color);
+    }
+    
+    /* For the specified frequency bin, set magnitude_sq to the value that maps to the desired color */
+    bar.magnitude_sq[freq_bin] = waterfall_color_index_to_magnitude_sq((uint8_t)color_idx);
+    
+    if (xSemaphoreTake(g_LvglMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        waterfall_add_column(canvas, &bar);
+        xSemaphoreGive(g_LvglMutex);
+        return 0;
+    } else {
+        printf("Failed to acquire LVGL mutex\n");
+        return 1;
+    }
+}
+#endif
+
+/**
  * Static array of available tokens
  * Terminated with a null entry to mark the end of the array
  */
@@ -415,6 +576,7 @@ static const struct s_tokens aTokens[] = {
     {"help",        "Display available commands",           fnHelp},
     {"blink",       "Get/set LED blink rate (ms)",          fnBlink},
     {"micDebug",    "Get/set microphone debug level",       fnMicDebug},
+    {"micGain",     "Get/set microphone gain (1-16)",       fnMicGain},
     {"startClock",  "Start and display clock widget",       fnStartClock},
     {"stopClock",   "Stop and remove clock widget",         fnStopClock},
     {"setTime",     "Set clock needle value (0-59)",        fnSetTime},
@@ -423,9 +585,11 @@ static const struct s_tokens aTokens[] = {
     {"wifiConnect", "Connect to WiFi (usage: wifiConnect SSID pass)", fnWifiConnect},
     {"wifiStatus",  "Check WiFi connection status",         fnWifiStatus},
     {"rtosStatus",  "Display FreeRTOS task stack usage",    fnRtosStatus},
-    {"udpStart",    "Start UDP server (audio on port 5001)",  fnUdpStart},
-    {"udpStop",     "Stop UDP server",                      fnUdpStop},
-    {NULL,          NULL,                                    NULL}
+    {"udpStart",      "Start UDP server (audio on port 5001)",  fnUdpStart},
+    {"udpStop",       "Stop UDP server",                      fnUdpStop},
+    {"enableWaterfall","Enable waterfall display",           fnEnableWaterfall},
+    {"disableWaterfall","Disable waterfall display",         fnDisableWaterfall},
+    {NULL,            NULL,                                    NULL}
 };
 
 /**

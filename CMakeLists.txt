@@ -26,6 +26,8 @@ get_filename_component(PARENT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
 set(FREERTOS_KERNEL_PATH "${PARENT_DIR}/FreeRTOS-Kernel_real")
 set(LVGL_PATH "${PARENT_DIR}/lvgl")
 set(PICO_SDK_PATH "${PARENT_DIR}/pico-sdk")
+set(CMSIS_DSP_PATH "${PARENT_DIR}/CMSIS-DSP")
+set(CMSIS_6_PATH "${PARENT_DIR}/CMSIS_6")
 
 # Set platform and compiler for RP2350
 set(PICO_PLATFORM rp2350)
@@ -55,6 +57,12 @@ pico_sdk_init()
 
 # Include FreeRTOS Kernel for RP2350
 include(${FREERTOS_KERNEL_PATH}/portable/ThirdParty/Community-Supported-Ports/GCC/RP2350_ARM_NTZ/FreeRTOS_Kernel_import.cmake)
+
+# Configure CMSIS_6 include paths for CMSIS-DSP dependency
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -I${CMSIS_6_PATH}/CMSIS/Core/Include")
+
+# Add CMSIS-DSP as a subdirectory for FFT and signal processing
+add_subdirectory(${CMSIS_DSP_PATH} ${CMAKE_BINARY_DIR}/CMSIS-DSP)
 
 # =====================================================================
 # Generate LUT_Params.h from microphone_config.h
@@ -87,6 +95,8 @@ set(SOURCES
     src/trustzone_stubs.c
     src/parser.c
     src/widgets.c
+    src/waterfall.c
+    src/spectrogram.c
     src/microphone.c
     src/audio_dsp_example.c
     src/OpenPDMFilter.c
@@ -105,6 +115,8 @@ target_include_directories(vibecode4 PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_BINARY_DIR}/generated
     ${LVGL_PATH}
+    ${CMSIS_DSP_PATH}/Include
+    ${CMSIS_6_PATH}/CMSIS/Core/Include
     ${PICO_SDK_PATH}/src/rp2_common/hardware_gpio/include
     ${PICO_SDK_PATH}/src/rp2_common/hardware_pio/include
     ${PICO_SDK_PATH}/src/rp2_common/hardware_dma/include
@@ -151,6 +163,7 @@ target_link_libraries(vibecode4
     lvgl
     FreeRTOS-Kernel
     FreeRTOS-Kernel-Heap4
+    CMSISDSP
     pico_cyw43_arch_lwip_poll
     pico_lwip
     pico_status_led

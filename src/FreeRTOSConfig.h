@@ -43,7 +43,7 @@
 #define configUSE_PREEMPTION                    1
 #define configUSE_TICKLESS_IDLE                 0
 #define configUSE_IDLE_HOOK                     0
-#define configUSE_TICK_HOOK                     0
+#define configUSE_TICK_HOOK                     1
 #define configTICK_RATE_HZ                      ((TickType_t) 1000)
 #define configCPU_CLOCK_HZ                      (150000000)  /* RP2350 runs at 150 MHz */
 #define configMAX_PRIORITIES                    16
@@ -81,9 +81,9 @@
 #define configUSE_DAEMON_TASK_STARTUP_HOOK      0
 
 /* Run time and task stats gathering related definitions. */
-#define configGENERATE_RUN_TIME_STATS           0
+#define configGENERATE_RUN_TIME_STATS           1
 #define configUSE_TRACE_FACILITY                1
-#define configUSE_STATS_FORMATTING_FUNCTIONS    0
+#define configUSE_STATS_FORMATTING_FUNCTIONS    1
 
 /* Co-routine related definitions. */
 #define configUSE_CO_ROUTINES                   0
@@ -95,9 +95,9 @@
 #define configTIMER_QUEUE_LENGTH                10
 #define configTIMER_TASK_STACK_DEPTH            1024
 
-/* SMP port only */
-#define portSUPPORT_SMP                         0
-#define configNUMBER_OF_CORES                   1
+/* SMP port - DUAL CORE ENABLED */
+#define portSUPPORT_SMP                         1
+#define configNUMBER_OF_CORES                   2
 
 /* TrustZone Related */
 #define configENABLE_TRUSTZONE                  0
@@ -105,12 +105,11 @@
 #define configENABLE_PAC                        0
 #define configENABLE_FPU                        1
 #define configENABLE_MVE                        0
-#define configUSE_CORE_AFFINITY                 0
+/* Core affinity ENABLED for dual-core mode */
+#define configUSE_CORE_AFFINITY                 1
 /* In July 2023 FreeRTOS changed the name of this macro to the one above,
    but older versions of Pico SDK (1.*) were still using this one: */
 #define configNUM_CORES                         configNUMBER_OF_CORES
-/* configUSE_CORE_AFFINITY may be set only when configNUM_CORES > 1 - DISABLED FOR SINGLE CORE */
-/* #define configUSE_CORE_AFFINITY                 1 */
 #define configTICK_CORE                         0
 #define configRUN_MULTIPLE_PRIORITIES           1
 #define configUSE_TASK_PREEMPTION_DISABLE       0
@@ -153,6 +152,21 @@ to exclude the API function. */
 #define INCLUDE_xQueueGetMutexHolder            1
 
 /* A header file that defines trace macro can be included here. */
+
+/* Run-time stats timer implementation for RP2350 */
+#if configGENERATE_RUN_TIME_STATS == 1
+    extern volatile uint32_t ulHighFrequencyTimerTicks;
+    
+    /* Initialize timer for run-time stats collection - no-op, uses global counter */
+    #define portCONFIGURE_TIMER_FOR_RUN_TIME_STATS() do { } while(0)
+    
+    /* Get current run-time counter value (returns global timer counter) */
+    #define portGET_RUN_TIME_COUNTER_VALUE() ulHighFrequencyTimerTicks
+    
+    /* Tick hook to increment the high-frequency timer counter */
+    extern void vApplicationTickHook(void);
+    #define configTICK_HOOK_FUNCTION() vApplicationTickHook()
+#endif
 
 #endif /* FREERTOS_CONFIG_H */
 

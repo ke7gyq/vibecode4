@@ -129,6 +129,13 @@ void pdm_microphone_set_filter_max_volume(uint8_t max_volume);
 void pdm_microphone_set_filter_gain(uint8_t gain);
 
 /**
+ * Get current filter gain
+ * 
+ * @return Current gain multiplier
+ */
+uint8_t pdm_microphone_get_filter_gain(void);
+
+/**
  * Set filter volume for next read operations
  * Controls output level
  * 
@@ -183,6 +190,26 @@ extern AudioBuffers_t g_audioBuffers;
 extern SemaphoreHandle_t g_audioReadySemaphore;
 
 /**
+ * Message queue structure for audio buffer notifications
+ * Contains buffer metadata and pointer to audio data
+ */
+typedef struct {
+    uint8_t buffer_id;              // Buffer ID: 1 or 2
+    uint32_t sequence;              // Incrementing sequence number (detects missed buffers)
+    int16_t *buffer_ptr;            // Pointer to actual audio buffer
+    uint32_t sample_count;          // Number of samples in this buffer
+    uint32_t timestamp_ms;          // Timestamp when buffer completed (ms)
+} AudioBufferMessage_t;
+
+/**
+ * Message queues for audio buffer distribution
+ * Each consumer (UDP, Waterfall) gets independent queue
+ * This prevents race conditions and lost notifications
+ */
+extern QueueHandle_t g_audioQueueUDP;
+extern QueueHandle_t g_audioQueueWaterfall;
+
+/**
  * Initialize the PDM microphone system
  * Sets up PIO, DMA, and FreeRTOS task
  * 
@@ -200,6 +227,14 @@ uint8_t get_audio_ready(void);
  * Clear the audio ready status after consuming buffer
  */
 void clear_audio_ready(void);
+
+/**
+ * Get the current UDP audio queue depth for diagnostics
+ * Returns the number of pending audio buffers in the UDP processing queue
+ * 
+ * @return Number of messages in queue (0-4)
+ */
+UBaseType_t microphone_get_udp_queue_depth(void);
 
 /**
  * Microphone task - runs PDM to PCM conversion and DMA transfer

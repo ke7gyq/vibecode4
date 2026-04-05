@@ -119,3 +119,24 @@ The ScanWiFi function should stop when the wifi scan times out. Don't print the 
 
 
 
+I would like to investigate integrating a waterfall display into the project. Audio data is transfered into the frequency domain using
+the CMMIS arm FFT routines. The magnitude squared for each frequency is squared, and a lookup function is called that bins the log
+amplitude into 16 seperate nummbers. These numbers are used as an index into a color table which determines the pixel output color. 
+Use the library found at rpi-pico/CMIS-DSP, and CMIS 6, as well as the code at rpi-pico/auto_spectrogram-example for guidance.
+Downsample the auudio data as necessary. Write code for the FFT functions in the file "spectrogram.c, spectrogram.h",
+tune the dimensions of arrays and options using #defines in spectrogram.h
+
+To start with, I would like to investigate using the LVGL canvas widget for the waterfall display. Create the relevant code in the
+files called "waterfall.c, waterfall.h" These files contain the code to generate the waterfall. Use the entire display
+ara for the LVGL canvas. The vertical axis is 240 Pixels, while the horizontal axis is 320 pixels. Evenly divide the frequency 
+axis into 16 bands. The hoirizontal axis is the time axis. For now, divide the time axis into 
+
+I want to test and debug the waterfall and the spectrogram code seperately. Let's start with the waterfall code. Create the waterfall
+code, and add it to the code base. Add two functions to parser.c, the first function called "newWaterfall" instansiates the canvas, clearing the screen. 
+The second function, called addWaterfall <x, y, color> adds a bar at horizonal position X, y units high, and color where color is one of
+16 colors available for displaying the amplitude.  Use the matlab parula colormap as a default colormap. Define this colormap as a const
+array of values.
+
+Please evaluate this, and let me know of any concerns. I want an estimate of RAM usage.
+
+

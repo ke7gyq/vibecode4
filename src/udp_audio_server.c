@@ -155,58 +155,61 @@ static void udp_recv_callback(void *arg, struct udp_pcb *pcb, struct pbuf *p,
     pbuf_free(p);
 }
 
-/* Audio task - waits for semaphore from microphone when buffer is ready */
+/* Audio task - receives messages from queue when buffer is ready */
 void udp_audio_task(void *parameters) {
     printf("UDP Audio Task Started\n");
     
     g_udp_audio_task_handle = xTaskGetCurrentTaskHandle();
     g_current_buffer_being_sent = 0;
     
+    static uint32_t last_sequence = 0;
+    static uint32_t frame_count = 0;
+    AudioBufferMessage_t msg;
+    
     while (1) {
-        /* Wait for semaphore from microphone task (signaled when buffer ready) */
-        BaseType_t result = xSemaphoreTake(g_audioReadySemaphore, pdMS_TO_TICKS(1000));
+        /* Wait for message from audio queue (non-blocking, timeout 1s) */
+        BaseType_t result = xQueueReceive(g_audioQueueUDP, &msg, pdMS_TO_TICKS(1000));
         
         if (result == pdTRUE) {
-            /* Semaphore taken - audio data is ready */
+            /* Message received - audio data is ready */
             
-            /* Determine which buffer is ready */
-            uint8_t ready_buffer = g_audioReady;
-            if (ready_buffer == 0) {
-                /* Stale semaphore or race condition */
-                if (g_micDebug) {
-                    printf("[UDP] Warning: semaphore taken but no buffer ready\n");
+            /* Check for missed buffers (sequence numbering) */
+            if (last_sequence > 0 && msg.sequence != last_sequence + 1) {
+                uint32_t missed = msg.sequence - last_sequence - 1;
+                g_audio_samples_dropped += missed * msg.sample_count;
+                if (g_micDebug >= 1) {
+                    printf("[UDP] Frame %lu: DROPPED %lu buffers (seq %lu → %lu)\n",
+                           frame_count, missed, last_sequence, msg.sequence);
                 }
-                continue;
             }
+            last_sequence = msg.sequence;
             
             /* Track buffer switch */
-            if (ready_buffer != g_current_buffer_being_sent) {
-                g_current_buffer_being_sent = ready_buffer;
-                if (g_micDebug) {
-                    printf("[UDP] Sending buffer %d\n", g_current_buffer_being_sent);
+            if (msg.buffer_id != g_current_buffer_being_sent) {
+                g_current_buffer_being_sent = msg.buffer_id;
+                if (g_micDebug >= 1) {
+                    printf("[UDP] Frame %lu: Sending buffer %d (seq=%lu, %u samples)\n", 
+                           frame_count, g_current_buffer_being_sent, msg.sequence, msg.sample_count);
                 }
             }
             
-            /* Get pointer to ready buffer */
-            int16_t *buffer_to_send = NULL;
-            if (ready_buffer == 1) {
-                buffer_to_send = g_audioBuffers.buffer1;
-            } else if (ready_buffer == 2) {
-                buffer_to_send = g_audioBuffers.buffer2;
-            } else {
-                g_audio_samples_dropped += AUDIO_BUFFER_SIZE;
-                if (g_micDebug) {
-                    printf("[UDP] ERROR: Invalid buffer ready state: %d\n", ready_buffer);
+            /* Validate buffer pointer */
+            if (msg.buffer_ptr == NULL) {
+                g_audio_samples_dropped += msg.sample_count;
+                if (g_micDebug >= 1) {
+                    printf("[UDP] ERROR: NULL buffer pointer in message\n");
                 }
+                frame_count++;
                 continue;
             }
             
             /* Send the complete buffer */
-            udp_audio_send_frame(buffer_to_send);
+            udp_audio_send_frame(msg.buffer_ptr);
+            frame_count++;
             
         } else {
-            /* Timeout waiting for semaphore */
-            if (g_server_running && g_micDebug) {
+            /* Timeout waiting for queue message */
+            if (g_server_running && g_micDebug >= 2) {
                 printf("[UDP] Timeout waiting for audio buffer (server running)\n");
             }
         }

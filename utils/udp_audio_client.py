@@ -13,10 +13,10 @@ import sys
 
 def main():
     parser = argparse.ArgumentParser(description='UDP Audio Client - Receive audio from RP2350')
-    parser.add_argument('--host', default='192.168.1.207', help='Pico IP address')
+    parser.add_argument('--host', default='192.168.12.200', help='Pico IP address')
     parser.add_argument('--port', type=int, default=5001, help='UDP audio port')
     parser.add_argument('--output', default='audio.wav', help='Output WAV file')
-    parser.add_argument('--duration', type=int, default=30, help='Capture duration in seconds')
+    parser.add_argument('--duration', type=int, default=15, help='Capture duration in seconds')
     parser.add_argument('--sample-rate', type=int, default=48000, help='Expected sample rate (Hz)')
     parser.add_argument('--frame-size', type=int, default=528, help='Samples per frame')
     
@@ -33,7 +33,7 @@ def main():
     # Create UDP socket
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)  # 1MB receive buffer
-    sock.settimeout(1.0)
+    sock.settimeout(0.5)  # Shorter timeout for better responsiveness
     
     # Send initial packet to register with server
     try:
@@ -57,9 +57,11 @@ def main():
     frame_size_bytes = args.frame_size * 2  # 16-bit samples
     lost_frames = 0
     last_seq = None
+    timeout_count = 0
+    max_timeouts = 0
     
     try:
-        print(f"[INFO] Listening for audio packets...")
+        print(f"[INFO] Listening for audio packets (Frame size: {frame_size_bytes} bytes)...")
         while True:
             # Check if we've exceeded duration
             elapsed = time.time() - start_time
@@ -68,8 +70,9 @@ def main():
                 break
             
             try:
-                # Receive UDP packet
+                # Receive UDP packet with timeout
                 data, (src_ip, src_port) = sock.recvfrom(65536)
+                timeout_count = 0  # Reset timeout counter on successful receive
                 
                 if len(data) >= frame_size_bytes:
                     # Extract audio samples (16-bit signed, little-endian)
@@ -77,6 +80,15 @@ def main():
                     
                     # Write to WAV file
                     wav_file.writeframes(struct.pack(f'<{args.frame_size}h', *samples))
+                    
+                    # **CRITICAL FIX**: Flush the underlying file buffer after each write
+                    # This prevents buffer overflow issues at ~12 seconds
+                    # wave.Wave_write uses _file internally, so flush that
+                    try:
+                        if hasattr(wav_file, '_file'):
+                            wav_file._file.flush()
+                    except (AttributeError, ValueError):
+                        pass
                     
                     total_samples += args.frame_size
                     total_frames += 1
@@ -87,24 +99,42 @@ def main():
                         elapsed_seconds = now - start_time
                         sample_rate = total_samples / elapsed_seconds if elapsed_seconds > 0 else 0
                         print(f"[CAPTURE] {total_samples} samples ({total_samples * 2} bytes), "
-                              f"rate: {sample_rate:.0f} Hz ({elapsed_seconds:.1f}s)")
+                              f"frames: {total_frames}, rate: {sample_rate:.0f} Hz ({elapsed_seconds:.1f}s)")
                         last_stats_time = now
+                        max_timeouts = max(max_timeouts, timeout_count)
                 else:
-                    # Frame too small, skip
-                    pass
+                    # Frame too small, skip with warning
+                    print(f"[WARNING] Received {len(data)} bytes, expected at least {frame_size_bytes} bytes")
             
             except socket.timeout:
-                # No data available, that's OK
-                pass
+                # No data available within timeout period
+                timeout_count += 1
+                
+                # Alert if timeouts are happening frequently (indicates network issues)
+                if timeout_count >= 3:
+                    elapsed = time.time() - start_time
+                    print(f"[WARNING] No data for {timeout_count * 0.5:.1f}s at elapsed {elapsed:.1f}s - "
+                          f"Network issue or Pico not sending? "
+                          f"(Received {total_frames} frames so far)")
+                    timeout_count = 0  # Reset to avoid spam
+                
+                pass  # Continue waiting
     
     except KeyboardInterrupt:
         print(f"\n[INFO] Capture stopped by user")
     
     except Exception as e:
         print(f"[ERROR] Receive error: {e}")
+        import traceback
+        traceback.print_exc()
     
     finally:
-        # Close file and socket
+        # Flush and close file to ensure all data is written
+        try:
+            if hasattr(wav_file, '_file'):
+                wav_file._file.flush()
+        except (AttributeError, ValueError):
+            pass
         wav_file.close()
         sock.close()
         
@@ -118,8 +148,10 @@ def main():
             print(f"[INFO] Average rate: {avg_rate:.0f} Hz")
             print(f"[INFO] Elapsed time: {elapsed:.2f}s")
             print(f"[INFO] File: {args.output}")
+            print(f"[INFO] Lost frames: {lost_frames}")
         
         return 0
 
 if __name__ == '__main__':
     sys.exit(main())
+

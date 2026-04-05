@@ -13,7 +13,8 @@
 #include "microphone.h"
 #include "network.h"
 #include "tcp_server.h"
-// #include "pico/cyw43_arch.h"
+#include "waterfall.h"
+#include "spectrogram.h"
 
 
 
@@ -23,11 +24,18 @@
 /* LVGL display handle */
 static lv_display_t *display;
 
+/* Spectrogram processor context for FFT and frequency analysis */
+static spectrogram_t g_spectrogram;
+
 /* FreeRTOS synchronization */
 SemaphoreHandle_t g_LvglMutex;
 
 /* LED blink rate in milliseconds */
 uint32_t g_blinkRateMs = 1000;
+
+/* High-frequency timer counter for FreeRTOS runtime statistics */
+/* Incremented by configTICK_HOOK_FUNCTION for per-tick precision */
+volatile uint32_t ulHighFrequencyTimerTicks = 0;
 
 /**
  * FreeRTOS Stack Overflow Hook - called when a task overflows its stack
@@ -47,6 +55,14 @@ void vApplicationMallocFailedHook(void) {
     while (1) {
         sleep_ms(100);
     }
+}
+
+/**
+ * FreeRTOS Tick Hook - called every system tick
+ * Used to increment the high-frequency timer counter for runtime statistics
+ */
+void vApplicationTickHook(void) {
+    ulHighFrequencyTimerTicks++;
 }
 
 
@@ -249,6 +265,14 @@ int main(void)
         printf("Failed to create LVGL mutex\n");
     }
 
+    /* Initialize spectrogram processor for FFT analysis */
+    printf("Initializing spectrogram processor...\n");
+    if (spectrogram_init(&g_spectrogram) != 0) {
+        printf("ERROR: Failed to initialize spectrogram\n");
+        return 1;
+    }
+    printf("Spectrogram initialized successfully\n");
+
     // Timer task - medium-high priority (LVGL display management)
     result = xTaskCreate(
         timer_task,           // Task function
@@ -335,12 +359,15 @@ int main(void)
     // UDP Audio Task - sends audio frames when timer notifies it
     // Stack: 2048 words = 8KB (large to prevent stack overflow with frame buffer)
     // Priority 2: Medium-high, below microphone (3) to avoid starving parser task
-    result = xTaskCreate(
+    // Core Affinity: Core 0 (separate from waterfall FFT on Core 1)
+    const UBaseType_t core_0_affinity = (1 << 0);  /* Core 0 only */
+    result = xTaskCreateAffinitySet(
         udp_audio_task,       // Task function
         "UdpAudioTask",       // Task name
         2048,                 // Stack size in words (8KB - much safer margin)
         NULL,                 // Parameters
         2,                    // Priority: medium-high (not higher than needed)
+        core_0_affinity,      // Core affinity: Core 0
         NULL                  // Task handle (not needed)
     );
     if (result != pdPASS) {
@@ -348,6 +375,10 @@ int main(void)
         return 1;
     }
     #endif
+
+    /* Attach spectrogram processor to waterfall display */
+    printf("Attaching spectrogram to waterfall task...\n");
+    waterfall_set_spectrogram(&g_spectrogram);
 
     printf("Starting FreeRTOS scheduler...\n");
     vTaskStartScheduler();

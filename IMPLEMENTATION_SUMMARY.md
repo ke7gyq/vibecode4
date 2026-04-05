@@ -1,8 +1,15 @@
 # Vibecode4 UDP Audio Streaming - Implementation Summary
 
-## ✅ Latest Updates (Apr 3, 2026)
+## ✅ Latest Updates (Apr 4, 2026)
 
-**Zero-Copy Optimization & Diagnostics:**
+**Dual-Core SMP Architecture & Microphone Control:**
+- ✅ Dual-Core RP2350: Core 0 (UDP + LVGL display) | Core 1 (FFT + spectrum accumulation)
+- ✅ Spectrum Accumulation: 100-frame batching with magnitude-squared summation (no division)
+- ✅ No Queue Backup: UDP queue 0/4, Waterfall queue 0/4 - perfect isolation between cores
+- ✅ Microphone Gain Control: `micGain` parser command (range 1-16) for dynamic capture level adjustment
+- ✅ Verified Stable: Both cores active, waterfall display updating smoothly, UDP streaming protected
+
+**Previous Updates (Apr 3, 2026):**
 - ✅ Zero-Copy UDP: Replaced `PBUF_RAM` with `PBUF_REF` - direct pointer to audio buffer (eliminates memcpy)
 - ✅ PDM Clock Diagnostics: Debug output shows actual system clock, target PDM freq, clock divider, and measured PDM frequency
 - ✅ Fixed Sample Rate Bug: UDP client now records at correct 48000 Hz (was hardcoded to 42496 Hz)
@@ -26,6 +33,8 @@
    - `microphone_task()` - FreeRTOS task for PDM→PCM conversion
    - DMA pipelining: ISR re-triggers buffer fill concurrently with filtering
    - Semaphore posts when PCM buffer complete
+   - `pdm_microphone_set_filter_gain(uint8_t gain)` - Dynamic gain control (1-16)
+   - `pdm_microphone_get_filter_gain()` - Read current gain setting (via `micGain` parser command)
 
 2. **[src/microphone_config.h](src/microphone_config.h)** - Centralized config
    - Filter parameters (LP/HP frequency, decimation, gain)
@@ -87,9 +96,52 @@
     - Reports sampling rate errors and percent deviation
     - Used to verify audio quality and detect sample rate issues
 
+### Parser Commands (USB Serial Interface)
+
+12. **[src/parser.c](src/parser.c)** - Command-line interface
+    - **`micGain [1-16]`** - Get/set microphone filter gain (NEW)
+      - Adjusts PDM filter gain multiplier (1=no gain, 16=maximum)
+      - No arguments: displays current gain setting
+      - Example: `micGain 8` (sets gain to 8× amplification)
+      - Note: Independent of waterfall display sensitivity (future enhancement)
+    - **`micDebug [0-2]`** - Get/set microphone debug output level
+      - 0 = off, 1 = warnings, 2 = verbose
+    - **`rtosStatus`** - Display FreeRTOS task stack usage and queue depths
+      - Shows UDP and Waterfall queue status (0/4 format)
+    - **`enableWaterfall` / `disableWaterfall`** - Control spectrum display
+    - **`udpStart` / `udpStop`** - Control UDP audio streaming
+    - Other commands: help, blink, setTime, scanWifi, etc.
+
 ---
 
 ## 🔄 Architecture Overview
+
+### Dual-Core Separation (RP2350 SMP)
+
+**Core 0 (Primary):**
+- FreeRTOS system tick and scheduler
+- UDP audio transmission (semaphore-based, DMA-pipelining)
+- LVGL display rendering
+- Network tasks
+- Parser/command interface
+
+**Core 1 (FFT Processor):**
+- Waterfall display task (pinned via `xTaskCreateAffinitySet`)
+- Real-time FFT computation on all audio frames
+- Spectrum accumulation (100-frame batching with magnitude-squared summation)
+- Display update queue handling
+
+**Inter-Core Synchronization:**
+- FreeRTOS message queues (thread-safe cross-core)
+  - `g_audioQueueUDP` → UDP task on Core 0
+  - `g_audioQueueWaterfall` → Waterfall task on Core 1
+- LVGL mutex (standard cross-core mutex usage)
+- No deadlock risk (single mutex, no circular dependencies)
+
+**Performance Result:**
+- ✅ UDP Queue: 0/4 (not starved by FFT load)
+- ✅ Waterfall Queue: 0/4 (FFT keeps pace with audio)
+- ✅ Both IDLE tasks active (cores have spare capacity)
 
 ### Data Flow
 
