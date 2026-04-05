@@ -127,4 +127,28 @@ uint32_t waterfall_get_accumulation_progress(void);
  */
 uint8_t waterfall_get_frame_skip_rate(void);
 
+/**
+ * Set the waterfall spectrum gain
+ * Gain is a percentage value (1-1000+)
+ * Internally computed as gainSquared = (gain/100)^2 for efficient spectrum scaling
+ * 
+ * @param gain New gain value (1 or higher)
+ */
+void waterfall_set_gain(uint32_t gain);
+
+/**
+ * Get the current waterfall spectrum gain
+ * 
+ * @return Current gain value
+ */
+uint32_t waterfall_get_gain(void);
+
+/**
+ * Get the squared gain value used internally for spectrum scaling
+ * Computed as (gain/100)^2 for efficient per-bin multiplication
+ * 
+ * @return Current gain squared value (float32_t)
+ */
+float32_t waterfall_get_gain_squared(void);
+
 #endif /* WATERFALL_H */

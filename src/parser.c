@@ -163,6 +163,41 @@ static uint8_t fnSetTime(char *rest, void *v) {
 }
 
 /**
+ * Token function for the "gainWaterfall" command
+ * Gets or sets the waterfall display gain
+ * Formats: 'gainWaterfall' (get), 'gainWaterfall 10' (set to 10)
+ * 
+ * @param rest Remainder of the command string (gain value or empty)
+ * @param v Void pointer for context (unused)
+ * @return 0 on success, non-zero on failure
+ */
+static uint8_t fnGainWaterfall(char *rest, void *v) {
+    (void)v;
+    
+    // Skip whitespace
+    while (*rest && isspace(*rest)) {
+        rest++;
+    }
+    
+    // If no arguments, return current value
+    if (*rest == '\0') {
+        printf("Current waterfall gain: %lu\n", waterfall_get_gain());
+        return 0;
+    }
+    
+    // Parse the gain value
+    uint32_t gain_value;
+    if (sscanf(rest, "%lu", &gain_value) != 1) {
+        printf("Error: gainWaterfall requires a numeric value\n");
+        return 1;
+    }
+    
+    // Set the gain (setter validates and computes squared gain)
+    waterfall_set_gain(gain_value);
+    return 0;
+}
+
+/**
  * Token function for the "scanWifi" command
  * Initiates a WiFi network scan
  * 

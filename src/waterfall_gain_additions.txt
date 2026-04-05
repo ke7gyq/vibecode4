@@ -1,0 +1,57 @@
+ADD TO waterfall.h BEFORE #endif:
+
+/**
+ * Set waterfall gain
+ * Gain is applied as: gained_magnitude = magnitude * (gain / 100)^2
+ * @param gain Gain value (default: 10)
+ */
+void waterfall_set_gain(uint32_t gain);
+
+/**
+ * Get current waterfall gain
+ * @return Current gain value
+ */
+uint32_t waterfall_get_gain(void);
+
+/**
+ * Get waterfall gain squared (for internal use)
+ * @return Computed gain value: (gain / 100)^2
+ */
+float32_t waterfall_get_gain_squared(void);
+
+
+ADD TO waterfall.c AFTER waterfall_get_frame_skip_rate():
+
+/**
+ * Set waterfall gain and compute squared gain for spectrum processing
+ * Formula: g_gainWaterfallSquared = (g_gainWaterfall / 100)^2
+ * Default gain of 10 yields: (10/100)^2 = 0.01
+ *
+ * @param gain New gain value (recommended range: 1-100)
+ */
+void waterfall_set_gain(uint32_t gain) {
+    if (gain == 0) {
+        printf("[Waterfall] ERROR: Gain cannot be zero, ignoring\n");
+        return;
+    }
+    g_gainWaterfall = gain;
+    g_gainWaterfallSquared = ((float32_t)gain / 100.0f);
+    g_gainWaterfallSquared = g_gainWaterfallSquared * g_gainWaterfallSquared;  /* Square it */
+    printf("[Waterfall] Gain set to %lu, gainSquared = %.6f\n", gain, g_gainWaterfallSquared);
+}
+
+/**
+ * Get current waterfall gain
+ * @return Current gain value
+ */
+uint32_t waterfall_get_gain(void) {
+    return g_gainWaterfall;
+}
+
+/**
+ * Get waterfall squared gain (for internal spectrum processing)
+ * @return Current g_gainWaterfallSquared value
+ */
+float32_t waterfall_get_gain_squared(void) {
+    return g_gainWaterfallSquared;
+}

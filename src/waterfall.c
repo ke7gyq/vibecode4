@@ -120,6 +120,10 @@ static uint32_t g_waterfall_frames_accumulated = 0;  /* Total frames processed *
 static uint32_t g_waterfall_spectra_displayed = 0;   /* Total averaged spectra sent to display */
 static uint32_t g_waterfall_frames_dropped = 0;      /* Frames lost due to queue overflow */
 
+/* Waterfall gain control */
+static uint32_t g_gainWaterfall = 10;  /* Default: 10 */
+static float32_t g_gainWaterfallSquared = 0.01f;  /* Computed from gain: (gain/100)^2 = (10/100)^2 = 0.01 */
+
 /* ============== Implementation ============== */
 
 /**
@@ -261,14 +265,17 @@ static void waterfall_task(void *pvParameters)
                         t_waterfallBar bar;
                         memset(&bar, 0, sizeof(bar));
                         
-                        /* Pass accumulated magnitude_sq directly (let log function handle scaling) */
+                        /* Pass accumulated magnitude_sq with gain applied (let log function handle scaling) */
                         for (uint8_t i = 0; i < WATERFALL_FREQ_BANDS; i++) {
-                            /* Clamp accumulated values to uint32_t range for display */
-                            bar.magnitude_sq[i] = (g_waterfall_magnitude_accum[i] > 0xFFFFFFFFULL) ? 0xFFFFFFFFUL : (uint32_t)g_waterfall_magnitude_accum[i];
+                            /* Apply gain to accumulated magnitude-squared value */
+                            float32_t gained = (float32_t)g_waterfall_magnitude_accum[i] * g_gainWaterfallSquared;
+                            
+                            /* Clamp to uint32_t range for display */
+                            bar.magnitude_sq[i] = (gained > 0xFFFFFFFFULL) ? 0xFFFFFFFFUL : (uint32_t)gained;
                             
                             if (g_micDebug >= 2) {
-                                printf("[Waterfall] Band %u: accum=%llu display=%u\n",
-                                       i, g_waterfall_magnitude_accum[i], bar.magnitude_sq[i]);
+                                printf("[Waterfall] Band %u: accum=%llu gained=%.2f display=%u\n",
+                                       i, g_waterfall_magnitude_accum[i], gained, bar.magnitude_sq[i]);
                             }
                         }
                         
@@ -622,4 +629,44 @@ UBaseType_t waterfall_get_queue_depth(void)
         return 0;
     }
     return uxQueueMessagesWaiting(g_audioQueueWaterfall);
+}
+
+/**
+ * Set the waterfall spectrum gain
+ * Gain is a percentage value (1-1000+)
+ * Internally computed as gainSquared = (gain/100)^2 for efficient spectrum scaling
+ * 
+ * @param gain New gain value (1 or higher)
+ */
+void waterfall_set_gain(uint32_t gain)
+{
+    if (gain == 0) {
+        printf("Error: Gain must be >= 1\n");
+        return;
+    }
+    
+    g_gainWaterfall = gain;
+    g_gainWaterfallSquared = (float32_t)(gain * gain) / 10000.0f;  /* (gain/100)^2 */
+    printf("Waterfall gain set to %lu (squared: %.6f)\n", g_gainWaterfall, g_gainWaterfallSquared);
+}
+
+/**
+ * Get the current waterfall spectrum gain
+ * 
+ * @return Current gain value
+ */
+uint32_t waterfall_get_gain(void)
+{
+    return g_gainWaterfall;
+}
+
+/**
+ * Get the squared gain value used internally for spectrum scaling
+ * Computed as (gain/100)^2 for efficient per-bin multiplication
+ * 
+ * @return Current gain squared value (float32_t)
+ */
+float32_t waterfall_get_gain_squared(void)
+{
+    return g_gainWaterfallSquared;
 }

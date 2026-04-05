@@ -147,3 +147,9 @@ processor1, and the fft/waterfall routine affinity was moved back to processor 0
 into LVGL from waterfall, we may relax the load on the UDP task. Your thoughts?
 
 
+I want to add a function to parse that sets the waterfall gain. In the user interface, call it gainWaterfall. If no arguments are 
+given, return the current gain value, which we'll set at a defauilt value of 10. Add setters / getters to waterfall. The getter
+returns gain value which is allocated as uint32_t g_gainWaterfall = 10. The Setter for the watefall accepts the gain value, and
+computes a powergain value, called float32_t g_gainWaterfallSquared, is calculated as 
+squared ( g_gainWaterfall/waterfallAccumulationCount) For each of the frequency bins, multiply the frequency bin value by this 
+comptued value before determining the color value
