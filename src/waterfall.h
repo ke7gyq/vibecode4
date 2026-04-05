@@ -145,11 +145,12 @@ uint32_t waterfall_get_gain(void);
 
 /**
  * Get the squared gain value used internally for spectrum scaling
- * Computed as (gain/100)^2 for efficient per-bin multiplication
+ * Returns the scaled gain multiplier (scaled by 10000)
+ * Example: gain=10 returns 100 (represents 0.01 when divided by 10000)
  * 
- * @return Current gain squared value (float32_t)
+ * @return Scaled gain squared value (uint32_t)
  */
-float32_t waterfall_get_gain_squared(void);
+uint32_t waterfall_get_gain_squared(void);
 
 /**
  * Set the waterfall colormap by index

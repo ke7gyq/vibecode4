@@ -149,7 +149,7 @@ static uint32_t g_waterfall_frames_dropped = 0;      /* Frames lost due to queue
 
 /* Waterfall gain control */
 static uint32_t g_gainWaterfall = 10;  /* Default: 10 */
-static float32_t g_gainWaterfallSquared = 0.01f;  /* Computed from gain: (gain/100)^2 = (10/100)^2 = 0.01 */
+static uint32_t g_gainWaterfallSquaredScaled = 100;  /* Scaled by 10000: (10*10) = 100 */
 
 /* Colormap selection */
 static const Colormap *g_colormap16 = jet_colormap_16;  /* Pointer to active colormap (default: Jet) */
@@ -305,11 +305,11 @@ static void waterfall_task(void *pvParameters)
                         
                         /* Pass accumulated magnitude_sq with gain applied (let log function handle scaling) */
                         for (uint8_t i = 0; i < WATERFALL_FREQ_BANDS; i++) {
-                            /* Apply gain to accumulated magnitude-squared value */
-                            float32_t gained = (float32_t)g_waterfall_magnitude_accum[i] * g_gainWaterfallSquared;
+                            /* Apply gain using integer arithmetic: gained = accum[i] * (gain*gain) / 10000 */
+                            uint64_t gained = ((uint64_t)g_waterfall_magnitude_accum[i] * g_gainWaterfallSquaredScaled) / 10000;
                             
                             /* Clamp to uint32_t range for display */
-                            bar.magnitude_sq[i] = (gained > 0xFFFFFFFFULL) ? 0xFFFFFFFFUL : (uint32_t)gained;
+                            bar.magnitude_sq[i] = (gained > 0xFFFFFFFFUL) ? 0xFFFFFFFFUL : (uint32_t)gained;
                             
                             if (g_micDebug >= 2) {
                                 printf("[Waterfall] Band %u: accum=%llu gained=%.2f display=%u\n",
@@ -684,8 +684,8 @@ void waterfall_set_gain(uint32_t gain)
     }
     
     g_gainWaterfall = gain;
-    g_gainWaterfallSquared = (float32_t)(gain * gain) / 10000.0f;  /* (gain/100)^2 */
-    printf("Waterfall gain set to %lu (squared: %.6f)\n", g_gainWaterfall, g_gainWaterfallSquared);
+    g_gainWaterfallSquaredScaled = gain * gain;  /* Store as integer: (gain/100)^2 * 10000 = gain^2 */
+    printf("Waterfall gain set to %lu\n", g_gainWaterfall);
 }
 
 /**
@@ -700,13 +700,13 @@ uint32_t waterfall_get_gain(void)
 
 /**
  * Get the squared gain value used internally for spectrum scaling
- * Computed as (gain/100)^2 for efficient per-bin multiplication
+ * Returns the scaled gain multiplier (scaled by 10000)
  * 
- * @return Current gain squared value (float32_t)
+ * @return Scaled gain squared value
  */
-float32_t waterfall_get_gain_squared(void)
+uint32_t waterfall_get_gain_squared(void)
 {
-    return g_gainWaterfallSquared;
+    return g_gainWaterfallSquaredScaled;
 }
 
 /**
