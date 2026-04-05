@@ -490,35 +490,33 @@ void microphone_task(void *parameters)
                     .timestamp_ms = to_ms_since_boot(get_absolute_time())
                 };
                 
-                BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-                
-                /* Queue for UDP task */
+                /* Queue for UDP task (using xQueueSend - task context, not ISR) */
                 if (g_audioQueueUDP != NULL) {
-                    if (xQueueSendFromISR(g_audioQueueUDP, &msg, &xHigherPriorityTaskWoken) == errQUEUE_FULL) {
+                    if (xQueueSend(g_audioQueueUDP, &msg, 0) == errQUEUE_FULL) {
                         if (g_micDebug >= 1) {
                             printf("[Mic] WARNING: UDP queue FULL (seq=%lu dropped)\n", msg.sequence);
                         }
                     } else if (g_micDebug >= 2) {
-                        printf("[Mic-ISR] UDP← seq=%lu buf=%u %u.%u ms\n", 
+                        printf("[Mic] UDP← seq=%lu buf=%u %u.%u ms\n", 
                                msg.sequence, msg.buffer_id, msg.timestamp_ms/1000, msg.timestamp_ms%1000);
                     }
                 }
                 
-                /* Queue for Waterfall task */
+                /* Queue for Waterfall task (using xQueueSend - task context, not ISR) */
                 if (g_audioQueueWaterfall != NULL) {
-                    if (xQueueSendFromISR(g_audioQueueWaterfall, &msg, &xHigherPriorityTaskWoken) == errQUEUE_FULL) {
+                    if (xQueueSend(g_audioQueueWaterfall, &msg, 0) == errQUEUE_FULL) {
                         if (g_micDebug >= 1) {
                             printf("[Mic] WARNING: Waterfall queue FULL (seq=%lu dropped)\n", msg.sequence);
                         }
                     } else if (g_micDebug >= 2) {
-                        printf("[Mic-ISR] WTF← seq=%lu buf=%u %u.%u ms\n",
+                        printf("[Mic] WTF← seq=%lu buf=%u %u.%u ms\n",
                                msg.sequence, msg.buffer_id, msg.timestamp_ms/1000, msg.timestamp_ms%1000);
                     }
                 }
                 
-                /* Legacy semaphore signal for backward compatibility */
+                /* Legacy semaphore signal (using xSemaphoreGive - task context, not ISR) */
                 if (g_audioReadySemaphore != NULL) {
-                    xSemaphoreGiveFromISR(g_audioReadySemaphore, &xHigherPriorityTaskWoken);
+                    xSemaphoreGive(g_audioReadySemaphore);
                 }
                 
                 current_buffer = (current_buffer == 1) ? 2 : 1;

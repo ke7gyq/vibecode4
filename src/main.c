@@ -322,15 +322,14 @@ int main(void)
 
     #if(1)
     // Microphone task - captures PDM audio and converts to PCM
-    // Priority 2: Real-time work (DMA ISR) preempts regardless of task priority
-    // Task context is just semaphore wait + queue post (not time-critical)
-    // Same priority as UDP/Waterfall to prevent task starvation
+    // **HIGHEST PRIORITY** - Real-time audio capture cannot be delayed
+    // Clock is already running continuously from initialize_pdm_clock()
     result = xTaskCreate(
         microphone_task,
         "MicrophoneTask",
         512,
         NULL,
-        2,  /* Priority: same as consumers to allow fair scheduling */
+        3,  /* Priority: highest - real-time audio capture */
         NULL
     );
     if (result != pdPASS) {
