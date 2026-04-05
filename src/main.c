@@ -192,9 +192,9 @@ static void parser_task(void *parameters)
     fflush(stdout);
     
     while (1) {
-        // Read a character with timeout (non-blocking)
-        // getchar_timeout_us returns the character if available, or a negative value on timeout
-        ch = getchar_timeout_us(100000);  // 100ms timeout
+        // Read a character with short timeout (1ms) to allow task yielding
+        // getchar_timeout_us returns the character if available, or PICO_ERROR_TIMEOUT
+        ch = getchar_timeout_us(1000);  // 1ms timeout (was 100ms - caused busy-wait)
         
         if (ch != PICO_ERROR_TIMEOUT) {
             // Character received
