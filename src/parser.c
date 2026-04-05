@@ -51,43 +51,6 @@ static uint8_t fnMicDebug(char *rest, void *v) {
     return 0;
 }
 
-/**
- * Token function for the "micGain" command
- * Gets or sets the microphone filter gain (1-16)
- */
-static uint8_t fnMicGain(char *rest, void *v) {
-    (void)v;
-    
-    // Skip whitespace
-    while (*rest && isspace(*rest)) {
-        rest++;
-    }
-    
-    // If no arguments, return current value
-    if (*rest == '\0') {
-        printf("Current microphone gain: %u (range: 1-16)\n", pdm_microphone_get_filter_gain());
-        return 0;
-    }
-    
-    // Parse the gain value
-    uint32_t gain_value;
-    if (sscanf(rest, "%lu", &gain_value) != 1) {
-        printf("Error: micGain requires a numeric value (1-16)\n");
-        return 1;
-    }
-    
-    // Clamp to valid range
-    if (gain_value < 1 || gain_value > 16) {
-        printf("Error: micGain must be between 1 and 16\n");
-        return 1;
-    }
-    
-    // Set the gain
-    pdm_microphone_set_filter_gain((uint8_t)gain_value);
-    printf("Microphone gain set to: %u\n", (uint8_t)gain_value);
-    return 0;
-}
-
 /* Forward declaration of fnHelp - implemented after aTokens definition */
 static uint8_t fnHelp(char *rest, void *v);
 
@@ -576,7 +539,6 @@ static const struct s_tokens aTokens[] = {
     {"help",        "Display available commands",           fnHelp},
     {"blink",       "Get/set LED blink rate (ms)",          fnBlink},
     {"micDebug",    "Get/set microphone debug level",       fnMicDebug},
-    {"micGain",     "Get/set microphone gain (1-16)",       fnMicGain},
     {"startClock",  "Start and display clock widget",       fnStartClock},
     {"stopClock",   "Stop and remove clock widget",         fnStopClock},
     {"setTime",     "Set clock needle value (0-59)",        fnSetTime},

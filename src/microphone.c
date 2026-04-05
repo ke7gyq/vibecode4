@@ -273,14 +273,6 @@ void pdm_microphone_set_filter_max_volume(uint8_t max_volume) {
  */
 void pdm_microphone_set_filter_gain(uint8_t gain) {
     g_pdm_mic.filter.Gain = gain;
-    printf("[Microphone] Filter gain set to: %u\n", gain);
-}
-
-/**
- * Get current filter gain
- */
-uint8_t pdm_microphone_get_filter_gain(void) {
-    return g_pdm_mic.filter.Gain;
 }
 
 /**

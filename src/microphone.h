@@ -129,13 +129,6 @@ void pdm_microphone_set_filter_max_volume(uint8_t max_volume);
 void pdm_microphone_set_filter_gain(uint8_t gain);
 
 /**
- * Get current filter gain
- * 
- * @return Current gain multiplier
- */
-uint8_t pdm_microphone_get_filter_gain(void);
-
-/**
  * Set filter volume for next read operations
  * Controls output level
  * 
