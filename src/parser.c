@@ -586,6 +586,7 @@ static const struct s_tokens aTokens[] = {
     {"udpStop",       "Stop UDP server",                      fnUdpStop},
     {"enableWaterfall","Enable waterfall display",           fnEnableWaterfall},
     {"disableWaterfall","Disable waterfall display",         fnDisableWaterfall},
+    {"gainWaterfall", "Get/set waterfall gain (1-N)",        fnGainWaterfall},
     {NULL,            NULL,                                    NULL}
 };
 
