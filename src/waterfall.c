@@ -27,14 +27,41 @@ extern QueueHandle_t g_audioQueueWaterfall;
 /* ============== Parula Colormap (16-level discrete version) ============== */
 
 /**
- * Matlab Parula colormap sampled at 16 discrete levels
- * RGB values that will be converted by LVGL to the correct format
+ * RGB color structure for colormaps
+ * Values will be converted by LVGL to the correct format
  */
 typedef struct {
     uint8_t r, g, b;
-} ParulaColor;
+} Colormap;
 
-static const ParulaColor parula_colormap_16[] = {
+/**
+ * Matplotlib Jet colormap sampled at 16 discrete levels (blue to red)
+ * Index 0 = blue (lowest), Index 15 = red (highest)
+ */
+static const Colormap jet_colormap_16[] = {
+    {0,     0,   139},   /* 0:  Deep Blue */
+    {0,     0,   255},   /* 1:  Blue */
+    {0,   100,   255},   /* 2:  Light Blue */
+    {0,   200,   255},   /* 3:  Cyan */
+    {0,   255,   200},   /* 4:  Cyan-Green */
+    {100, 255,   100},   /* 5:  Green */
+    {155, 255,   0},     /* 6:  Yellow-Green */
+    {200, 200,   0},     /* 7:  Yellow */
+    {255, 200,   0},     /* 8:  Yellow-Orange */
+    {255, 150,   0},     /* 9:  Orange */
+    {255, 100,   0},     /* 10: Orange-Red */
+    {255, 50,    0},     /* 11: Red-Orange */
+    {255, 0,     0},     /* 12: Red */
+    {200, 0,     0},     /* 13: Dark Red */
+    {150, 0,     0},     /* 14: Darker Red */
+    {100, 0,     50},    /* 15: Deep Red */
+};
+
+/**
+ * Matlab Parula colormap sampled at 16 discrete levels
+ * RGB values that will be converted by LVGL to the correct format
+ */
+static const Colormap parula_colormap_16[] = {
     {31,   69,  139},   /* 0:  Deep Blue */
     {0,    143, 150},   /* 1:  Teal */
     {0,    166, 147},   /* 2:  Cyan */
@@ -123,6 +150,17 @@ static uint32_t g_waterfall_frames_dropped = 0;      /* Frames lost due to queue
 /* Waterfall gain control */
 static uint32_t g_gainWaterfall = 10;  /* Default: 10 */
 static float32_t g_gainWaterfallSquared = 0.01f;  /* Computed from gain: (gain/100)^2 = (10/100)^2 = 0.01 */
+
+/* Colormap selection */
+static const Colormap *g_colormap16 = jet_colormap_16;  /* Pointer to active colormap (default: Jet) */
+static uint32_t g_colormapIndex = 0;  /* 0 = Jet, 1 = Parula */
+
+/* Array of available colormaps */
+static const Colormap * const g_colormaps[] = {
+    jet_colormap_16,
+    parula_colormap_16,
+};
+#define NUM_COLORMAPS 2
 
 /* ============== Implementation ============== */
 
@@ -481,7 +519,7 @@ void waterfall_add_column(lv_obj_t *canvas, const t_waterfallBar *bar)
         uint8_t amplitude_level = magnitude_sq_to_amplitude_level(bar->magnitude_sq[freq_bin]);
         
         /* Get RGB color for this amplitude level and convert using LVGL */
-        ParulaColor rgb = parula_colormap_16[amplitude_level];
+        Colormap rgb = g_colormap16[amplitude_level];
         lv_color_t color = lv_color_make(rgb.r, rgb.g, rgb.b);
         
         /* Calculate which rows correspond to this frequency band */
@@ -669,4 +707,34 @@ uint32_t waterfall_get_gain(void)
 float32_t waterfall_get_gain_squared(void)
 {
     return g_gainWaterfallSquared;
+}
+
+/**
+ * Set the waterfall colormap by index
+ * If index is invalid, defaults to Jet (index 0)
+ * 
+ * @param index Colormap index (0 = Jet, 1 = Parula)
+ */
+void waterfall_set_colormap(uint32_t index)
+{
+    if (index >= NUM_COLORMAPS) {
+        printf("Invalid colormap index %lu, using default (Jet)\n", index);
+        g_colormapIndex = 0;
+        g_colormap16 = g_colormaps[0];
+    } else {
+        g_colormapIndex = index;
+        g_colormap16 = g_colormaps[index];
+        const char *names[] = {"Jet", "Parula"};
+        printf("Colormap changed to %s (index %lu)\n", names[index], index);
+    }
+}
+
+/**
+ * Get the current waterfall colormap index
+ * 
+ * @return Current colormap index
+ */
+uint32_t waterfall_get_colormap(void)
+{
+    return g_colormapIndex;
 }

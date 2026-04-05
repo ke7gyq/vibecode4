@@ -198,6 +198,46 @@ static uint8_t fnGainWaterfall(char *rest, void *v) {
 }
 
 /**
+ * Token function for the "colormapWaterfall" command
+ * Gets or sets the waterfall colormap by index
+ * Available: 0=Jet (default), 1=Parula
+ * 
+ * Formats: 'colormapWaterfall' (get), 'colormapWaterfall 1' (set to 1)
+ * Invalid indices default to Jet (0)
+ * 
+ * @param rest Remainder of the command string (colormap index or empty)
+ * @param v Void pointer for context (unused)
+ * @return 0 on success, non-zero on failure
+ */
+static uint8_t fnColormapWaterfall(char *rest, void *v) {
+    (void)v;
+    
+    // Skip whitespace
+    while (*rest && isspace(*rest)) {
+        rest++;
+    }
+    
+    // If no arguments, return current colormap index
+    if (*rest == '\0') {
+        uint32_t index = waterfall_get_colormap();
+        const char *names[] = {"Jet", "Parula"};
+        printf("Current colormap: %s (index %lu)\n", names[index], index);
+        return 0;
+    }
+    
+    // Parse the colormap index
+    uint32_t colormap_index;
+    if (sscanf(rest, "%lu", &colormap_index) != 1) {
+        printf("Error: colormapWaterfall requires a numeric index\n");
+        return 1;
+    }
+    
+    // Set the colormap (setter validates and defaults to 0 if invalid)
+    waterfall_set_colormap(colormap_index);
+    return 0;
+}
+
+/**
  * Token function for the "scanWifi" command
  * Initiates a WiFi network scan
  * 
@@ -587,6 +627,7 @@ static const struct s_tokens aTokens[] = {
     {"enableWaterfall","Enable waterfall display",           fnEnableWaterfall},
     {"disableWaterfall","Disable waterfall display",         fnDisableWaterfall},
     {"gainWaterfall", "Get/set waterfall gain (1-N)",        fnGainWaterfall},
+    {"colormapWaterfall", "Get/set waterfall colormap (0=Jet, 1=Parula)", fnColormapWaterfall},
     {NULL,            NULL,                                    NULL}
 };
 

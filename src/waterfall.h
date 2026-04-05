@@ -151,4 +151,20 @@ uint32_t waterfall_get_gain(void);
  */
 float32_t waterfall_get_gain_squared(void);
 
+/**
+ * Set the waterfall colormap by index
+ * Available colormaps: 0=Jet (default), 1=Parula
+ * Invalid indices default to Jet (0)
+ * 
+ * @param index Colormap index
+ */
+void waterfall_set_colormap(uint32_t index);
+
+/**
+ * Get the current waterfall colormap index
+ * 
+ * @return Current colormap index (0=Jet, 1=Parula)
+ */
+uint32_t waterfall_get_colormap(void);
+
 #endif /* WATERFALL_H */
