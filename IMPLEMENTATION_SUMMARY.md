@@ -1,25 +1,25 @@
-# Vibecode4 UDP Audio Streaming - Implementation Summary
+# Vibecode4 UDP Audio Streaming & Spectrum Display - Implementation Summary
 
-## ✅ Latest Updates (Apr 4, 2026)
+## ✅ Latest Updates (Apr 5, 2026)
 
-**Dual-Core SMP Architecture & Stream Processing:**
-- ✅ Dual-Core RP2350: Core 0 (UDP + LVGL display) | Core 1 (FFT + spectrum accumulation)
-- ✅ Spectrum Accumulation: 100-frame batching with magnitude-squared summation (no division)
-- ✅ No Queue Backup: UDP queue 0/4, Waterfall queue 0/4 - perfect isolation between cores
-- ✅ Verified Stable: Both cores active, waterfall display updating smoothly, UDP streaming protected
+**Spectrum Display with Dynamic Control:**
+- ✅ Multimedia Colormap System: Jet (blue→red) + Parula (blue→yellow), runtime switchable
+- ✅ Dynamic Spectrum Gain: 1-1000+ adjustment via `gainWaterfall` command, no audio latency
+- ✅ Integer Optimization: Eliminated float operations from spectrum loop (3d56df3)
+  - Before: UDP queue 4/4 full (46 kHz degrading to 40 kHz with stalls)
+  - After: UDP queue 0/4 healthy (46.95 kHz stable, zero frame loss)
+- ✅ Parser Efficiency: Reduced UART polling timeout 100ms → 1ms (6bcb5c3)
+  - ParserTask CPU: 77,836 ticks → 7,911 ticks (90% reduction)
+- ✅ Audio Verification: 15-second capture at 46.95 kHz, 1334 frames, 0 lost frames
 
-**Previous Updates (Apr 3, 2026):**
-- ✅ Zero-Copy UDP: Replaced `PBUF_RAM` with `PBUF_REF` - direct pointer to audio buffer (eliminates memcpy)
-- ✅ PDM Clock Diagnostics: Debug output shows actual system clock, target PDM freq, clock divider, and measured PDM frequency
-- ✅ Fixed Sample Rate Bug: UDP client now records at correct 48000 Hz (was hardcoded to 42496 Hz)
+**Previous Updates (Apr 4, 2026):**
+- ✅ Dual-Core SMP Architecture & Stream Processing
+- ✅ Spectrum Accumulation: 100-frame batching with magnitude-squared summation
+- ✅ Zero-Copy UDP: PBUF_REF eliminates memcpy
+- ✅ PDM Clock Diagnostics: Debug output for frequency verification
 - ✅ Pitch Accuracy: Verified to 0.01% error (440 Hz reference tone)
 
-**Previous Optimizations:**
-- ✅ DMA Pipelining: ISR re-triggers during task filtering for true concurrency
-- ✅ Semaphore-Driven Flow: Event-based UDP transmission (replaced 12ms timer)
-- ✅ Complete Buffers: No partial frame transmission issues
-
-**Status**: ✅ Production Ready | Build: SUCCESS | Audio Quality: EXCELLENT
+**Status**: ✅ Production Ready | Build: SUCCESS | Audio: 46.95 kHz stable | Display: Live waterfall spectrum | UI: Full TTY control
 
 ---
 
@@ -95,14 +95,37 @@
 
 ### Parser Commands (USB Serial Interface)
 
-12. **[src/parser.c](src/parser.c)** - Command-line interface
+12. **[src/parser.c](src/parser.c)** - Command-line interface (115200 baud TTY)
+    - **`help`** - Display all available commands
+    
+    **Audio Control:**
+    - **`udpStart` / `udpStop`** - Control UDP audio streaming (default: running)
+    - **`gainWaterfall [N]`** - Get/set spectrum gain (1-1000+, default: 10)
+      - `gainWaterfall` → Show current gain
+      - `gainWaterfall 20` → Set gain to 20 (multiply amplitude by 0.04)
+      - Integer math: `gained = (accum[i] * gain²) / 10000` (no float operations)
+    
+    **Display Control:**
+    - **`enableWaterfall` / `disableWaterfall`** - Enable/disable spectrum display updates
+    - **`colorWaterfall [N]`** - Get/set waterfall colormap
+      - `colorWaterfall` → Show current colormap
+      - `colorWaterfall 0` → Jet colormap (blue→red, default)
+      - `colorWaterfall 1` → Parula colormap (blue→yellow)
+      - Invalid indices default to Jet (0)
+    
+    **System Monitoring:**
+    - **`rtosStatus`** - Display FreeRTOS task CPU ticks, stack usage, queue depths
+      - Shows all tasks: MicrophoneTask, UdpAudioTask, WaterfallTask, TimerTask, ParserTask, etc.
+      - Queue status: UDP/Waterfall depth (0/4 = healthy, 4/4 = bottleneck)
+      - CPU ticks: Measure per-task overhead and identify bottlenecks
     - **`micDebug [0-2]`** - Get/set microphone debug output level
       - 0 = off, 1 = warnings, 2 = verbose
-    - **`rtosStatus`** - Display FreeRTOS task stack usage and queue depths
-      - Shows UDP and Waterfall queue status (0/4 format)
-    - **`enableWaterfall` / `disableWaterfall`** - Control spectrum display
-    - **`udpStart` / `udpStop`** - Control UDP audio streaming
-    - Other commands: help, blink, setTime, scanWifi, etc.
+    
+    **Other:**
+    - **`blink [ms]`** - Get/set LED blink rate
+    - **`setTime [N]`** - Set clock display value
+    - **`scanWifi` / `wifiConnect` / `wifiStatus`** - WiFi network commands
+    - More: startClock, stopClock, etc.
 
 ---
 

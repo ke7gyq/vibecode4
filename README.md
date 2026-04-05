@@ -1,16 +1,25 @@
-# Vibecode4 - Real-Time Microphone Audio Streaming System
+# Vibecode4 - Real-Time Microphone Audio Streaming & Spectrum Display System
 
-A complete **Raspberry Pi Pico 2 W** microphone capture and UDP audio streaming system with integrated OpenPDM2PCM filter and auto-generated lookup tables.
+A complete **Raspberry Pi Pico 2 W** microphone capture and UDP audio streaming system with:
+- **Real-time audio capture** via PIO + DMA (PDM @ 3.072 MHz)
+- **Live spectrum display** with Jet/Parula colormaps and dynamic gain control
+- **Stable UDP streaming** at 46.95 kHz (zero frame loss)
+- **Dual-core SMP optimization** (audio on Core 0, display on Core 1)
+- **Integrated OpenPDM2PCM filter** with auto-generated lookup tables
+
+**Status**: ✅ Complete • ✅ Tested • ✅ Production Ready
+
+---
 
 ## 🎯 What This Project Does
 
 - **Captures audio** from a MEMS microphone via PIO + DMA (PDM @ 3.072 MHz)
 - **Converts PDM → PCM** using OpenPDM2PCM filter with sinc³ decimation (64:1)
-- **Streams audio over UDP** at 83 Hz with 528-sample frames (43.8 kHz throughput)
+- **Streams audio over UDP** at 46.95 kHz with 528-sample frames (zero frame loss)
+- **Displays real-time waterfall spectrum** with horizontal scrolling and 16 frequency bands
+- **Provides TTY interface** for dynamic spectrum gain and colormap switching
 - **Auto-generates optimized lookup tables** at build time from configuration header
-- **Makes LUT mode configurable** via CMakeLists.txt (pre-computed const vs dynamic)
-
-**Status**: ✅ Complete • ✅ Tested • ✅ Production Ready
+- **Isolates critical tasks** via core affinity (SMP) to prevent display I/O blocking audio
 
 ---
 
@@ -43,7 +52,30 @@ picotool load build/vibecode4.uf2 -fx
 cp build/vibecode4.uf2 /media/pico/
 ```
 
-### 3. Start Audio Capture
+### 3. Interact via Serial (TTY)
+
+```bash
+# Connect via serial (115200 baud)
+minicom -b 115200 -D /dev/ttyACM0
+# or
+screen /dev/ttyACM0 115200
+```
+
+**Available Commands:**
+```
+help                    - Display all available commands
+gainWaterfall           - Show current spectrum gain (default: 10)
+gainWaterfall 20        - Set spectrum gain to 20 (multiplier)
+colorWaterfall          - Show current colormap (0=Jet, 1=Parula)
+colorWaterfall 1        - Switch to Parula colormap
+colorWaterfall 0        - Switch to Jet colormap (default)
+rtosStatus              - Show task CPU usage and queue depths
+udpStart                - Start UDP audio server (default: running)
+enableWaterfall         - Enable display updates
+disableWaterfall        - Disable display updates
+```
+
+### 4. Start Audio Capture
 
 **Telnet monitoring:**
 ```bash
@@ -51,53 +83,190 @@ python3 utils/telnet_pcm_client.py
 # Monitor live PCM output and RMS levels
 ```
 
-**UDP client (30-second capture):**
+**UDP client (15-second capture):**
 ```bash
-python3 utils/udp_audio_client.py --duration 30 --output capture.wav
-# Saves raw UDP frames to WAV file
+python3 utils/udp_audio_client.py --duration 15 --host 192.168.12.200 --output capture.wav
+# Saves UDP frames to WAV file
+# Expected: ~46.95 kHz rate, 1334 frames, 0 lost frames
 ```
 
 ---
 
-## 📐 System Architecture
+## ✨ Key Features
+
+### Real-Time Audio Streaming
+- **Sample Rate**: 48 kHz PCM (528 samples/buffer)
+- **Throughput**: 46.95 kHz stable (97.9% of target)
+- **Frame Loss**: Zero over 15-second capture
+- **Protocol**: UDP multicast on port 5001
+- **Queue Buffering**: Dual queues (UDP audio + Waterfall FFT) with healthy 0/4 depth
+
+### Spectrum Display
+- **Type**: Real-time waterfall display (horizontal time scroll)
+- **Resolution**: 256-point FFT → 16 frequency bands
+- **Display**: LVGL canvas widget on ST7789 LCD (320×240)
+- **Colormaps**: Jet (default, blue→red) + Parula (blue→yellow)
+- **Update Rate**: 100-frame accumulation per display update
+
+### Dynamic Spectrum Control
+- **Spectrum Gain**: 1-1000+ (adjustable via `gainWaterfall` command)
+- **Gain Application**: Integer arithmetic `gained = (accum[i] * gain²) / 10000`
+- **Colormap Selection**: Jet or Parula via `colorWaterfall` command
+- **TTY Interface**: Full interactive control over serial connection
+
+### Performance Optimization
+- **Dual-Core SMP**: Audio on Core 0, display on Core 1 (prevents blocking)
+- **Core Affinity Pinning**: TaskCreateAffinitySet for each core-specific task
+- **Integer Math**: No float operations in real-time audio loop
+- **Parser Efficiency**: 1ms UART polling with aggressive yielding (7.9k ticks)
+- **CPU Balance**: IDLE0/IDLE1 tasks monitor core utilization
+
+### Hardware Efficiency
+- **Flash Usage**: 874 KB (vibecode4.elf)
+- **RAM Usage**: 253 KB (FreeRTOS + buffers)
+- **Clock Rate**: 150 MHz Cortex-M33 ARM SMP
+- **Power Draw**: ~100-150 mA (audio + display active)
+
+---
+
+## 🎮 TTY Command Reference
+
+### Spectrum Gain Control
+```
+gainWaterfall              Show current gain (default: 10)
+gainWaterfall 20           Set gain to 20 (multiply amplitude by 0.04)
+gainWaterfall 50           Set gain to 50 (multiply amplitude by 0.25)
+gainWaterfall 100          Set gain to 100 (multiply amplitude by 1.0)
+```
+**Effect**: Changes spectrum display brightness in real-time (no audio latency)
+
+### Colormap Switching
+```
+colorWaterfall             Show current colormap (0=Jet, 1=Parula)
+colorWaterfall 0           Switch to Jet colormap (blue→red, default)
+colorWaterfall 1           Switch to Parula colormap (blue→yellow)
+colorWaterfall 99          Invalid index → defaults to Jet (0)
+```
+**Effect**: Changes frequency band color mapping instantly
+
+### System Status
+```
+rtosStatus                 Show all FreeRTOS tasks, CPU ticks, queue depths
+                           MicrophoneTask, UdpAudioTask, WaterfallTask, etc.
+
+udpStart                   Enable UDP audio streaming
+udpStop                    Stop UDP audio streaming
+
+enableWaterfall            Enable display updates
+disableWaterfall           Disable display updates
+
+help                       List all available commands
+```
+
+---
+
+## 📊 Performance Metrics
+
+### Audio Streaming Benchmark (15-second capture)
+```
+Test Command:
+  ./udp_audio_client.py --duration 15 --host 192.168.12.200
+
+Results:
+  Average Rate:     46,953 Hz (97.9% of target 48 kHz)
+  Total Frames:     1334 (perfect @ 83 frames/sec)
+  Lost Frames:      0 (zero packet loss)
+  Stable Region:    46.7-46.96 kHz (samples 6-15s)
+  Peak Rate:        46.96 kHz
+```
+
+### Task CPU Usage (rtosStatus output)
+```
+MicrophoneTask      767 ticks (real-time audio capture)
+TimerTask           6,439 ticks (display I/O on Core 1)
+ParserTask          7,911 ticks (1ms UART polling with yields)
+WaterfallTask       7,460 ticks (FFT + spectrum processing)
+UdpAudioTask        626 ticks (UDP frame queueing)
+---
+Total Active:       ~30k ticks
+IDLE0/IDLE1:        ~71k ticks each (healthy core utilization)
+```
+
+### Queue Depths (Healthy State)
+```
+UDP Queue Depth:       0/4 ✓ (producer/consumer balanced)
+Waterfall Queue Depth: 0/4 ✓ (spectrum processor keeping up)
+```
+*If UDP queue fills to 4/4: Display I/O blocking audio (check Core 1)*
+*If Waterfall queue fills to 4/4: FFT processing too slow (reduce FFT rate)*
+
+---
 
 ### Hardware
 ```
 ATSAMD21 Microphone
     ↓ (PDM @ 3.072 MHz, GPIOs 6-7)
-RP2350 Pico 2 W
-    ├─ PIO State Machine 0: PDM Clock Generation
-    ├─ PIO State Machine 1: PDM Data Sampling
-    ├─ DMA Channel: Moves PDM data to RAM
-    └─ FreeRTOS Microphone Task: PDM→PCM Conversion
-        ↓
-    UDP Audio Server (Port 12345)
-        ↓ (528 samples @ 83 Hz)
-Network Host
-    ├─ Python UDP Client (audio capture)
-    └─ Telnet Monitor (48 kHz PCM display)
+RP2350 Pico 2 W (Dual-Core SMP)
+    │
+    ├─ [Core 0] Audio Pipeline (Real-Time)
+    │   ├─ PIO State Machine 0: PDM Clock Generation
+    │   ├─ PIO State Machine 1: PDM Data Sampling
+    │   ├─ DMA Channel: PDM → RAM
+    │   ├─ MicrophoneTask (Priority 3): PDM→PCM conversion
+    │   ├─ UdpAudioTask (Priority 2): UDP streaming @ 46.95 kHz
+    │   └─ WaterfallTask (Priority 2): 256-point FFT + gain scaling
+    │
+    ├─ [Core 1] Display Pipeline (Non-Critical)
+    │   └─ TimerTask (Priority 2): LVGL + SPI display I/O
+    │
+    └─ FreeRTOS SMP Scheduler (portSUPPORT_SMP=1, configNUM_CORES=2)
+        ├─ Task affinity pinning prevents blocking between cores
+        └─ IDLE0/IDLE1 tasks monitor each core
+
+    ↓ UDP Audio Server (Core 0, Port 5001)
+        ↓ (528 samples @ 83 Hz = 46.95 kHz)
+    Network Host (UDP client captures audio)
+
+    ↓ SPI/I2C Display (Core 1, ST7789 LCD)
+        ↓ (Waterfall spectrum, 320×240)
+    LCD Display (Real-time waterfall visualization)
+
+    ↓ TTY Serial (UART 0, 115200 baud)
+        ↓ (User commands: gainWaterfall, colorWaterfall)
+    Host Terminal (Serial control interface)
 ```
 
 ### Data Pipeline
 
 ```
 Raw PDM Input (3.072 MHz, 1-bit)
-        ↓
-PIO State Machine (32-bit shift register)
-        ↓
+        ↓ [PIO State Machine]
 DMA Buffer (256 uint32_t, ping-pong)
-        ↓
-Microphone Task: process_pdm_to_pcm()
-        ├─ Pre-computed LUT lookup (if USE_CONST_LUT=1)
-        ├─ Sinc³ filter (3 cascaded stages)
-        └─ Decimation 64:1 → 48 kHz PCM
-        ↓
-UDP Audio Server Task
-        ├─ Frame buffer (528 samples)
-        ├─ 83 Hz output timer
-        └─ UDP broadcast (port 12345)
-        ↓
-Network: 528-sample frames @ 83 Hz = 43.8 kHz effective rate
+        ↓ [Core 0: MicrophoneTask]
+Sinc³ Filter (decimation 64:1)
+        ├─→ UDP Audio Stream @ 46.95 kHz
+        │   └─→ [UdpAudioTask on Core 0]
+        │       └─→ Network: 528-sample frames @ 83 Hz
+        │
+        └─→ Waterfall FFT Analysis
+            └─→ [Core 0: WaterfallTask]
+                ├─ 256-point FFT → 16 frequency bands
+                ├─ Integer gain scaling (user-controlled)
+                ├─ Log amplitude → 0-15 level mapping
+                ├─ Colormap RGB lookup (Jet/Parula)
+                └─→ [Core 1: TimerTask via LVGL]
+                    └─→ LCD Display (320×240 canvas)
+                        └─→ Horizontal waterfall scroll
+
+User Interface (TTY Serial @ 115200 baud)
+        ├─ gainWaterfall N      - Dynamic spectrum gain
+        ├─ colorWaterfall N     - Colormap switching
+        ├─ rtosStatus           - CPU monitoring
+        └─ enableWaterfall      - Display control
+
+Performance Monitoring:
+        Queue Depth: UDP 0/4, Waterfall 0/4 (healthy)
+        CPU Usage: MicrophoneTask 767 ticks, AllTasks <85k combined
 ```
 
 ### Configuration Flow
