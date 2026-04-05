@@ -492,8 +492,8 @@ void microphone_task(void *parameters)
                 
                 /* Queue for UDP task (using xQueueSend - task context, not ISR) */
                 if (g_audioQueueUDP != NULL) {
-                    /* Use 10ms timeout to yield CPU if queue is full, allowing consumers to drain */
-                    if (xQueueSend(g_audioQueueUDP, &msg, pdMS_TO_TICKS(10)) == errQUEUE_FULL) {
+                    /* Use 5ms timeout to yield CPU if queue is full, allowing consumers to drain */
+                    if (xQueueSend(g_audioQueueUDP, &msg, pdMS_TO_TICKS(5)) == errQUEUE_FULL) {
                         if (g_micDebug >= 1) {
                             printf("[Mic] WARNING: UDP queue FULL (seq=%lu dropped)\n", msg.sequence);
                         }
@@ -505,8 +505,8 @@ void microphone_task(void *parameters)
                 
                 /* Queue for Waterfall task (using xQueueSend - task context, not ISR) */
                 if (g_audioQueueWaterfall != NULL) {
-                    /* Use 10ms timeout to yield CPU if queue is full, allowing consumers to drain */
-                    if (xQueueSend(g_audioQueueWaterfall, &msg, pdMS_TO_TICKS(10)) == errQUEUE_FULL) {
+                    /* Use 5ms timeout to yield CPU if queue is full, allowing consumers to drain */
+                    if (xQueueSend(g_audioQueueWaterfall, &msg, pdMS_TO_TICKS(5)) == errQUEUE_FULL) {
                         if (g_micDebug >= 1) {
                             printf("[Mic] WARNING: Waterfall queue FULL (seq=%lu dropped)\n", msg.sequence);
                         }
