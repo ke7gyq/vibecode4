@@ -360,8 +360,9 @@ lv_obj_t * waterfall_init(void)
     
     /* Create waterfall processing task if not already created */
     if (g_waterfall_task_handle == NULL) {
-        /* Pin waterfall task to Core 1 to avoid CPU contention with UDP on Core 0 */
-        const UBaseType_t core_1_affinity = (1 << 1);  /* Core 1 only */
+        /* Pin waterfall task to Core 0 (moved from Core 1 to join UDP audio processing) */
+        /* This allows TimerTask (Core 1) to do SPI display I/O without interfering */
+        const UBaseType_t core_0_affinity = (1 << 0);  /* Core 0 only */
         
         BaseType_t result = xTaskCreateAffinitySet(
             waterfall_task,                    /* Task function */
@@ -369,7 +370,7 @@ lv_obj_t * waterfall_init(void)
             2048,                              /* Stack size in words */
             NULL,                              /* Task parameter */
             tskIDLE_PRIORITY + 2,              /* Priority */
-            core_1_affinity,                   /* Core affinity: Core 1 */
+            core_0_affinity,                   /* Core affinity: Core 0 (with UDP audio) */
             &g_waterfall_task_handle           /* Task handle */
         );
         
@@ -378,7 +379,7 @@ lv_obj_t * waterfall_init(void)
             waterfall_destroy(canvas);
             return NULL;
         }
-        printf("Waterfall task created on Core 1\n");
+        printf("Waterfall task created on Core 0\n");
     }
     
     return canvas;

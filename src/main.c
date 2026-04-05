@@ -273,20 +273,23 @@ int main(void)
     }
     printf("Spectrogram initialized successfully\n");
 
-    // Timer task - medium-high priority (LVGL display management)
-    result = xTaskCreate(
+    // Timer task - LVGL display management (SPI I/O heavy)
+    // Pin to Core 1 to prevent SPI transfers from blocking audio on Core 0
+    const UBaseType_t core_1_affinity_timer = (1 << 1);  /* Core 1 only */
+    result = xTaskCreateAffinitySet(
         timer_task,           // Task function
         "TimerTask",          // Task name
-        1536,
-        // 2048,                 // Stack size in words
+        1536,                 // Stack size in words
         NULL,                 // Parameters
-        2,                    // Priority: lower than microphone for real-time audio
-        &timer_handle
+        2,                    // Priority: lower than microphone
+        core_1_affinity_timer,// Core affinity: Core 1 (isolated display I/O)
+        &timer_handle         // Task handle
     );
     if (result != pdPASS) {
         printf("Failed to create timer task\n");
         return 1;
     }
+    printf("Timer task created on Core 1\n");
     // Blinker task - medium priority
     #if(1)
     result = xTaskCreate(

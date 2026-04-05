@@ -140,3 +140,10 @@ array of values.
 Please evaluate this, and let me know of any concerns. I want an estimate of RAM usage.
 
 
+
+I believe that we're spending all our time in timertask when updating the screen. LVGL defers it's screen processing to run on a timer.
+Unfortunately, we maintain a lock to provide thread safety to lvgl. I'm thinking that if the affinity of timerTask was moved to 
+processor1, and the fft/waterfall routine affinity was moved back to processor 0, and that if LVGL lock was only maintained on the 
+into LVGL from waterfall, we may relax the load on the UDP task. Your thoughts?
+
+
