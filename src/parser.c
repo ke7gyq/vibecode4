@@ -198,18 +198,18 @@ static uint8_t fnGainWaterfall(char *rest, void *v) {
 }
 
 /**
- * Token function for the "colormapWaterfall" command
+ * Token function for the "colorWaterfall" command
  * Gets or sets the waterfall colormap by index
  * Available: 0=Jet (default), 1=Parula
  * 
- * Formats: 'colormapWaterfall' (get), 'colormapWaterfall 1' (set to 1)
+ * Formats: 'colorWaterfall' (get), 'colorWaterfall 1' (set to 1)
  * Invalid indices default to Jet (0)
  * 
  * @param rest Remainder of the command string (colormap index or empty)
  * @param v Void pointer for context (unused)
  * @return 0 on success, non-zero on failure
  */
-static uint8_t fnColormapWaterfall(char *rest, void *v) {
+static uint8_t fnColorWaterfall(char *rest, void *v) {
     (void)v;
     
     // Skip whitespace
@@ -627,7 +627,7 @@ static const struct s_tokens aTokens[] = {
     {"enableWaterfall","Enable waterfall display",           fnEnableWaterfall},
     {"disableWaterfall","Disable waterfall display",         fnDisableWaterfall},
     {"gainWaterfall", "Get/set waterfall gain (1-N)",        fnGainWaterfall},
-    {"colormapWaterfall", "Get/set waterfall colormap (0=Jet, 1=Parula)", fnColormapWaterfall},
+    {"colorWaterfall", "Get/set waterfall colormap (0=Jet, 1=Parula)", fnColorWaterfall},
     {NULL,            NULL,                                    NULL}
 };
 
