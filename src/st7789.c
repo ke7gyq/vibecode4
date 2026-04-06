@@ -19,9 +19,7 @@ static const uint8_t st7789_init_seq[] = {
         1, 20, 0x01,                        // Software reset
         1, 10, 0x11,                        // Exit sleep mode
         2, 2, 0x3a, 0x55,                   // Set colour mode to 16 bit
-        //2, 0, 0x36, 0xc0,                // Set MADCTL: Portrate Mode.
-        //2, 0, 0x36, 0x00,                // Set MADCTL: Portrate Mode.
-        2, 0, 0x36, 0xa0,                   // Set MADCTL: Landscape Mode (BGR)
+        2, 0, 0x36, 0x40,                   // Set MADCTL: Portrait Mode (BGR)
         //2, 0, 0x36, 0x60,                 // Set MADCTL: Landscape Mode
         3, 0, 0xb0, 0x00, 0xf8,            // Set RAMCTL: endian bit
         5, 0, 0x2a, 0x00, 0x00, SCREEN_WIDTH >> 8, SCREEN_WIDTH & 0xff,   // CASET: column addresses
