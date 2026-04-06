@@ -197,6 +197,88 @@ static uint32_t my_tick(void) {
 // Full screen = 320×240×2 = 150 KB
 // This buffer = 320×10×2 = 6.4 KB
 // Saves 143.6 KB RAM!
+
+/**
+ * ST7789 Vertical Scroll Support - Hardware scrolling for efficient waterfall display
+ * 
+ * The ST7789 has built-in vertical scroll capability:
+ * - VSCRDEF (0x33): Define scroll area (top fixed, scroll area, bottom fixed)
+ * - VSCSAD (0x37): Set vertical scroll start address (which line to display at top)
+ * 
+ * By using hardware scroll, we can shift the entire display window left and write
+ * a single new column without copying the entire buffer.
+ */
+
+/**
+ * Set vertical scroll area definition
+ * Defines which part of display can scroll (typically full screen)
+ * 
+ * @param lines_before Fixed lines at top (usually 0)
+ * @param scroll_lines Lines that can scroll (usually SCREEN_HEIGHT)
+ * @param lines_after Fixed lines at bottom (usually 0)
+ */
+void st7789_set_vertical_scroll_area(uint16_t lines_before, uint16_t scroll_lines, uint16_t lines_after) {
+    uint8_t cmd_buf[7];
+    cmd_buf[0] = 0x33; // VSCRDEF - Vertical Scroll Definition
+    cmd_buf[1] = lines_before >> 8;
+    cmd_buf[2] = lines_before & 0xff;
+    cmd_buf[3] = scroll_lines >> 8;
+    cmd_buf[4] = scroll_lines & 0xff;
+    cmd_buf[5] = lines_after >> 8;
+    cmd_buf[6] = lines_after & 0xff;
+    lcd_write_cmd(pio, sm, cmd_buf, sizeof(cmd_buf));
+}
+
+/**
+ * Set vertical scroll start address
+ * Changes which line appears at the top of the display (hardware wrap-around)
+ * 
+ * @param start_line Line number to display at top (0 to SCREEN_HEIGHT-1)
+ */
+void st7789_set_vertical_scroll_offset(uint16_t start_line) {
+    uint8_t cmd_buf[3];
+    cmd_buf[0] = 0x37; // VSCSAD - Vertical Scroll Start Address
+    cmd_buf[1] = start_line >> 8;
+    cmd_buf[2] = start_line & 0xff;
+    lcd_write_cmd(pio, sm, cmd_buf, sizeof(cmd_buf));
+}
+
+/**
+ * Write a single vertical line (column) of pixels
+ * Used by waterfall to add new frequency column on the left after scrolling
+ * 
+ * @param x Column position (typically 0 for left edge after scroll)
+ * @param y Starting row
+ * @param height Number of pixels to write
+ * @param data Pixel data (16-bit color values)
+ */
+void st7789_write_column(uint16_t x, uint16_t y, uint16_t height, const uint16_t *data) {
+    // Set column address (x coordinate)
+    uint8_t cmd_buf[5];
+    cmd_buf[0] = 0x2a; // CASET
+    cmd_buf[1] = x >> 8;
+    cmd_buf[2] = x & 0xff;
+    cmd_buf[3] = x >> 8;  // x start = x end (single column)
+    cmd_buf[4] = x & 0xff;
+    lcd_write_cmd(pio, sm, cmd_buf, sizeof(cmd_buf));
+    
+    // Set row address (y coordinate and height)
+    cmd_buf[0] = 0x2b; // RASET
+    cmd_buf[1] = y >> 8;
+    cmd_buf[2] = y & 0xff;
+    cmd_buf[3] = (y + height - 1) >> 8;
+    cmd_buf[4] = (y + height - 1) & 0xff;
+    lcd_write_cmd(pio, sm, cmd_buf, sizeof(cmd_buf));
+    
+    // Write the pixel data via RAMWR (0x2c)
+    uint8_t ramwr_cmd = 0x2c;
+    lcd_write_cmd(pio, sm, &ramwr_cmd, 1);
+    lcd_set_dc_cs(1, 0);
+    
+    // Send pixels via DMA
+    lcd_write_pixels_dma(data, height);
+}
+
 #define BUFFER_HEIGHT 10
 static uint16_t g_displayBuffer0[SCREEN_WIDTH * BUFFER_HEIGHT];
 
