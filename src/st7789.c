@@ -316,17 +316,61 @@ void st7789_waterfall_update(const uint16_t *fft_data) {
     st7789_write_column(0, 0, WATERFALL_FFT_BINS, g_waterfallColumn);
 }
 
+// ============================================================================
+// LVGL rendering code - Disabled for waterfall, enable for other screens
+// ============================================================================
+
+#if (0)  // Disabled: Using hardware scroll waterfall instead
+
+static void disp_flush(lv_display_t * disp, const lv_area_t * area, uint8_t * px_map) {
+    // With partial rendering, use the area dimensions from LVGL
+    uint16_t width = lv_area_get_width(area);
+    uint16_t height = lv_area_get_height(area);
+    uint16_t x1 = area->x1, y1 = area->y1;
+    
+    setDrawArea(x1, y1, width, height);
+    start_pixels();
+    lcd_write_pixels_dma((const uint16_t *)px_map, width * height);
+    lv_display_flush_ready(disp);
+}
+
+static uint32_t my_tick(void) {
+    return to_ms_since_boot(get_absolute_time());
+}
+
+#define BUFFER_HEIGHT 10
+static uint16_t g_displayBuffer0[SCREEN_WIDTH * BUFFER_HEIGHT];
+
+#endif  // LVGL rendering disabled
+
 /**
- * Legacy LVGL initialization (kept for compatibility)
+ * Initialize LVGL display system
+ * Can be used for general UI screens (not waterfall)
+ * Currently disabled in favor of hardware scroll waterfall
+ * 
+ * To enable: Set #if (0) above to #if (1)
  */
 lv_display_t * initialize_lvgl() {
     st7789_lcd_init();
     lv_init();
     lv_display_t *disp = lv_display_create(SCREEN_WIDTH, SCREEN_HEIGHT);
+    
+#if (0)  // LVGL partial render mode - enable if using LVGL screens
+    lv_display_set_flush_cb(disp, disp_flush);
+    lv_display_set_buffers(
+        disp,
+        g_displayBuffer0,          // Buffer 1
+        NULL,                      // No second buffer (single buffered)
+        SCREEN_WIDTH * BUFFER_HEIGHT * sizeof(uint16_t),  // Buffer size in bytes
+        LV_DISPLAY_RENDER_MODE_PARTIAL                     // Partial mode
+    );
+#endif
+    
     lv_obj_t *screen = lv_obj_create(NULL);
     if (screen != NULL) {
         lv_screen_load(screen);
     }
     lv_disp_set_default(disp);
+    
     return disp;
 }
