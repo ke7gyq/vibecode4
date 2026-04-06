@@ -2,8 +2,11 @@
 // pindefs.h
 
 // Tested with the parts that have the height of 240 and 320
-#define SCREEN_WIDTH 240
-#define SCREEN_HEIGHT 320
+// Note: SCREEN_WIDTH and SCREEN_HEIGHT are used for initialization
+// They define the default landscape orientation (320x240)
+// Use st7789_set_portrait_mode() or st7789_set_landscape_mode() to change orientation
+#define SCREEN_WIDTH 320
+#define SCREEN_HEIGHT 240
 #define IMAGE_SIZE 256
 #define LOG_IMAGE_SIZE 8
 

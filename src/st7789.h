@@ -30,11 +30,23 @@ void st7789_flush(lv_display_t *display, const lv_area_t *area, uint8_t *px_map)
  * Initialize ST7789 hardware
  * 
  * Sets up the SPI interface, GPIO pins, and initializes the ST7789
- * display controller.
+ * display controller. Initializes in landscape mode by default.
  * 
  * @return 0 on success, non-zero on failure
  */
 int st7789_init_hw(void);
+
+/**
+ * Set display to portrait mode (240×320)
+ * Used for waterfall spectrogram display with vertical scroll
+ */
+void st7789_set_portrait_mode(void);
+
+/**
+ * Set display to landscape mode (320×240)
+ * Default mode for general UI/menu displays
+ */
+void st7789_set_landscape_mode(void);
 
 /**
  * Set vertical scroll area definition
