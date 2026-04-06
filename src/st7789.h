@@ -76,3 +76,19 @@ void st7789_set_vertical_scroll_offset(uint16_t start_line);
  * @param data Pixel data (16-bit color values)
  */
 void st7789_write_column(uint16_t x, uint16_t y, uint16_t height, const uint16_t *data);
+
+/**
+ * Initialize display for waterfall spectrogram with hardware scroll
+ * Configures ST7789 in portrait mode (240×320) with vertical scroll enabled.
+ * 
+ * @return 0 on success, non-zero on failure
+ */
+int st7789_init_waterfall(void);
+
+/**
+ * Write FFT column to waterfall display with hardware scroll
+ * Updates waterfall by scrolling left and writing new FFT column.
+ * 
+ * @param fft_data 16-element FFT magnitude array (0-65535 range)
+ */
+void st7789_waterfall_update(const uint16_t *fft_data);

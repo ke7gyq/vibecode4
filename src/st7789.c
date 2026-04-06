@@ -174,26 +174,17 @@ int st7789_lcd_init( void  ) {
 }
 
 
-static void disp_flush(lv_display_t * disp, const lv_area_t * area, uint8_t * px_map) {
-    // With partial rendering, use the area dimensions from LVGL
-    uint16_t width = lv_area_get_width(area);
-    uint16_t height = lv_area_get_height(area);
-    uint16_t x1 = area->x1, y1 = area->y1;
-    
-    setDrawArea(x1, y1, width, height);
-    start_pixels();
-    lcd_write_pixels_dma((const uint16_t *)px_map, width * height);
-    lv_display_flush_ready(disp);
+/**
+ * Initialize display for waterfall spectrogram with hardware scroll
+ * Configures ST7789 in portrait mode with vertical scroll enabled.
+ */
+int st7789_init_waterfall(void) {
+    st7789_lcd_init();
+    st7789_set_portrait_mode();
+    st7789_set_vertical_scroll_area(0, 320, 0);
+    st7789_set_vertical_scroll_offset(0);
+    return 0;
 }
-
-static uint32_t my_tick(void) {
-    return to_ms_since_boot(get_absolute_time());
-}
-
-// Partial buffer: 10 rows at a time instead of full screen
-// Full screen = 320×240×2 = 150 KB
-// This buffer = 320×10×2 = 6.4 KB
-// Saves 143.6 KB RAM!
 
 /**
  * ST7789 Vertical Scroll Support - Hardware scrolling for efficient waterfall display
@@ -298,38 +289,44 @@ void st7789_write_column(uint16_t x, uint16_t y, uint16_t height, const uint16_t
     lcd_write_pixels_dma(data, height);
 }
 
-#define BUFFER_HEIGHT 10
-static uint16_t g_displayBuffer0[SCREEN_WIDTH * BUFFER_HEIGHT];
+// Waterfall column buffer: 16 FFT bins for spectrogram display
+#define WATERFALL_FFT_BINS 16
+static uint16_t g_waterfallColumn[WATERFALL_FFT_BINS];
 
+/**
+ * Write FFT column to waterfall display with hardware scroll
+ * Updates waterfall by scrolling left and writing new FFT column.
+ * 
+ * @param fft_data 16-element FFT magnitude array (0-65535 range)
+ */
+void st7789_waterfall_update(const uint16_t *fft_data) {
+    if (fft_data == NULL) return;
+    
+    // Copy FFT data to column buffer
+    for (int i = 0; i < WATERFALL_FFT_BINS; i++) {
+        g_waterfallColumn[i] = fft_data[i];
+    }
+    
+    // Scroll display left by 1 pixel (hardware, wrap at 320)
+    static uint16_t scroll_offset = 0;
+    scroll_offset = (scroll_offset + 1) % 320;
+    st7789_set_vertical_scroll_offset(scroll_offset);
+    
+    // Write new column at left edge
+    st7789_write_column(0, 0, WATERFALL_FFT_BINS, g_waterfallColumn);
+}
+
+/**
+ * Legacy LVGL initialization (kept for compatibility)
+ */
 lv_display_t * initialize_lvgl() {
     st7789_lcd_init();
     lv_init();
     lv_display_t *disp = lv_display_create(SCREEN_WIDTH, SCREEN_HEIGHT);
-    lv_display_set_flush_cb(disp, disp_flush);
-    
-    // Use partial render mode with a 10-row buffer
-    // LVGL will render the display in horizontal strips
-    lv_display_set_buffers(
-        disp,
-        g_displayBuffer0,          // Buffer 1
-        NULL,                      // No second buffer (single buffered)
-        SCREEN_WIDTH * BUFFER_HEIGHT * sizeof(uint16_t),  // Buffer size in bytes
-        LV_DISPLAY_RENDER_MODE_PARTIAL                     // Partial mode
-    );
-    
-    // Set this display as the default display for LVGL
-    lv_disp_set_default(disp);
-    
-    // CRITICAL: Create and load a default screen
-    // lv_timer_handler() returns -1 if there's no active screen
-    // lv_obj_create(NULL) creates a screen object
     lv_obj_t *screen = lv_obj_create(NULL);
-    if (screen == NULL) {
-        printf("ERROR: Failed to create screen\n");
-        return disp;
+    if (screen != NULL) {
+        lv_screen_load(screen);
     }
-    lv_screen_load(screen);
-    
-    // lv_tick_set_cb(my_tick);
+    lv_disp_set_default(disp);
     return disp;
 }
