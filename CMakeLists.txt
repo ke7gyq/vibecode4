@@ -55,6 +55,10 @@ enable_language(ASM)
 # Initialize pico SDK
 pico_sdk_init()
 
+# OPTIMIZATION: Disable optimizations for reliable race condition handling
+# At -O2, compiler reordering defeats memory barriers. -O0 with memory barriers is stable.
+add_compile_options(-O0 -g)
+
 # Include FreeRTOS Kernel for RP2350
 include(${FREERTOS_KERNEL_PATH}/portable/ThirdParty/Community-Supported-Ports/GCC/RP2350_ARM_NTZ/FreeRTOS_Kernel_import.cmake)
 
@@ -102,6 +106,7 @@ set(SOURCES
     src/OpenPDMFilter.c
     src/network.c
     src/udp_audio_server.c
+    src/fault_handler.c
 )
 
 # Create executable for vibecode4

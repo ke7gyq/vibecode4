@@ -362,6 +362,28 @@ static uint8_t fnWifiStatus(char *rest, void *v) {
 }
 
 /**
+ * Token function for the "wifiRssi" command
+ * Gets the current WiFi signal strength (RSSI) in dBm
+ *
+ * @param rest Remainder of the command string (unused)
+ * @param v Void pointer for context (unused)
+ * @return 0 on success, non-zero on failure
+ */
+static uint8_t fnWifiRssi(char *rest, void *v) {
+    (void)rest;
+    (void)v;
+    
+    int rssi = network_get_rssi();
+    if (rssi == -999) {
+        printf("WiFi Signal: NOT CONNECTED or UNAVAILABLE\n");
+    } else {
+        printf("WiFi Signal Strength (RSSI): %d dBm\n", rssi);
+    }
+    
+    return 0;
+}
+
+/**
  * Token function for the "rtosStatus" command
  * Displays stack usage information for all running FreeRTOS tasks
  * 
@@ -493,7 +515,7 @@ static uint8_t fnUdpStop(char *rest, void *v) {
 
 /**
  * Token function for the "enableWaterfall" command
- * Creates a new waterfall display canvas and starts the waterfall task
+ * Starts the waterfall display server (similar to udpStart)
  * 
  * @param rest Remainder of the command string (unused)
  * @param v Void pointer for context (unused)
@@ -504,10 +526,10 @@ static uint8_t fnEnableWaterfall(char *rest, void *v) {
     (void)v;
     
     if (xSemaphoreTake(g_LvglMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        lv_obj_t *canvas = waterfall_init();
+        int result = waterfall_server_start();
         xSemaphoreGive(g_LvglMutex);
         
-        if (canvas != NULL) {
+        if (result == 0) {
             printf("Waterfall display enabled\n");
             return 0;
         } else {
@@ -522,7 +544,7 @@ static uint8_t fnEnableWaterfall(char *rest, void *v) {
 
 /**
  * Token function for the "disableWaterfall" command
- * Destroys the waterfall display canvas and stops the waterfall task
+ * Stops the waterfall display server (similar to udpStop)
  * 
  * @param rest Remainder of the command string (unused)
  * @param v Void pointer for context (unused)
@@ -533,13 +555,8 @@ static uint8_t fnDisableWaterfall(char *rest, void *v) {
     (void)v;
     
     if (xSemaphoreTake(g_LvglMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        lv_obj_t *canvas = waterfall_get_canvas();
-        if (canvas != NULL) {
-            waterfall_destroy(canvas);
-            printf("Waterfall display disabled\n");
-        } else {
-            printf("Waterfall display not active\n");
-        }
+        waterfall_server_stop();
+        printf("Waterfall display disabled\n");
         xSemaphoreGive(g_LvglMutex);
         return 0;
     } else {
@@ -547,64 +564,6 @@ static uint8_t fnDisableWaterfall(char *rest, void *v) {
         return 1;
     }
 }
-
-/**
- * Token function for the "addWaterfall" command (DISABLED - for testing only)
- * 
- * @deprecated Use automatic spectrogram integration instead
- */
-#if 0
-static uint8_t fnAddWaterfall(char *rest, void *v) {
-    (void)v;
-    
-    uint32_t freq_bin, color_idx;
-    
-    if (sscanf(rest, "%lu %lu", &freq_bin, &color_idx) != 2) {
-        printf("Usage: addWaterfall <freq_bin> <color_index>\n");
-        printf("  freq_bin: 0-15 (frequency band, 0=low, 15=high)\n");
-        printf("  color_index: 0-15 (amplitude, 0=dark blue, 15=bright yellow)\n");
-        return 1;
-    }
-    
-    if (freq_bin > 15) {
-        printf("Error: Frequency bin must be 0-15\n");
-        return 1;
-    }
-    
-    if (color_idx > 15) {
-        printf("Error: Color index must be 0-15\n");
-        return 1;
-    }
-    
-    lv_obj_t *canvas = waterfall_get_canvas();
-    if (canvas == NULL) {
-        printf("Error: Waterfall display not initialized. Use 'newWaterfall' first.\n");
-        return 1;
-    }
-    
-    /* Create waterfall bar with magnitude_sq values for all 16 frequency bins */
-    t_waterfallBar bar;
-    memset(&bar, 0, sizeof(bar));
-    
-    /* Fill frequencies below freq_bin with random colors for testing */
-    for (uint8_t i = 0; i < freq_bin; i++) {
-        uint8_t random_color = rand() % 16;  /* Random color 0-15 */
-        bar.magnitude_sq[i] = waterfall_color_index_to_magnitude_sq(random_color);
-    }
-    
-    /* For the specified frequency bin, set magnitude_sq to the value that maps to the desired color */
-    bar.magnitude_sq[freq_bin] = waterfall_color_index_to_magnitude_sq((uint8_t)color_idx);
-    
-    if (xSemaphoreTake(g_LvglMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        waterfall_add_column(canvas, &bar);
-        xSemaphoreGive(g_LvglMutex);
-        return 0;
-    } else {
-        printf("Failed to acquire LVGL mutex\n");
-        return 1;
-    }
-}
-#endif
 
 /**
  * Static array of available tokens
@@ -621,6 +580,7 @@ static const struct s_tokens aTokens[] = {
     {"wifiList",    "List WiFi scan results",               fnWifiList},
     {"wifiConnect", "Connect to WiFi (usage: wifiConnect SSID pass)", fnWifiConnect},
     {"wifiStatus",  "Check WiFi connection status",         fnWifiStatus},
+    {"wifiRssi",    "Get current WiFi signal strength (dBm)",  fnWifiRssi},
     {"rtosStatus",  "Display FreeRTOS task stack usage",    fnRtosStatus},
     {"udpStart",      "Start UDP server (audio on port 5001)",  fnUdpStart},
     {"udpStop",       "Stop UDP server",                      fnUdpStop},

@@ -120,7 +120,13 @@ static uint8_t *g_canvas_buffer = NULL;
 static uint16_t g_current_column = 0;
 
 /* FreeRTOS task handle for waterfall processor */
-static TaskHandle_t g_waterfall_task_handle = NULL;
+/* Waterfall task handle - NULL until waterfall_init creates the task */
+/* Made non-static so it can be checked by microphone.c to determine if waterfall is active */
+TaskHandle_t g_waterfall_task_handle = NULL;
+
+/* Waterfall task shutdown flag - set by waterfall_server_stop() to signal task to exit */
+/* Task checks this and calls vTaskDelete(NULL) to safely shutdown */
+static volatile int g_waterfall_server_shutdown = 0;
 
 /* Pointer to spectrogram context (set by main.c via waterfall_set_spectrogram) */
 static spectrogram_t *g_spectrogram_ctx = NULL;
@@ -185,6 +191,14 @@ static void waterfall_task(void *pvParameters)
     
     /* Task main loop */
     while (1) {
+        /* Check for shutdown signal */
+        if (g_waterfall_server_shutdown) {
+            printf("Waterfall task: Shutdown signal received, exiting...\n");
+            g_waterfall_task_handle = NULL;
+            vTaskDelete(NULL);  /* Task deletes itself safely */
+            return; /* Unreachable, but for clarity */
+        }
+        
         /* Monitor queue depth */
         UBaseType_t queue_depth = uxQueueMessagesWaiting(g_audioQueueWaterfall);
         if (queue_depth > peak_queue_depth) {
@@ -239,7 +253,7 @@ static void waterfall_task(void *pvParameters)
         }
         last_sequence = msg.sequence;
         
-        if (g_micDebug >= 1) {
+        if (g_micDebug >= 7) {
             printf("[Waterfall] Frame %lu: Processing seq=%lu buf=%u (%u samples)\n",
                    frame_count, msg.sequence, msg.buffer_id, msg.sample_count);
         }
@@ -249,7 +263,7 @@ static void waterfall_task(void *pvParameters)
             lv_obj_t *canvas = waterfall_get_canvas();
             if (canvas != NULL) {
                 /* === Load audio data into spectrogram input buffer === */
-                if (g_micDebug >= 2) {
+                if (g_micDebug >= 7) {
                     printf("[Waterfall] Frame %lu: Loading %u samples into spectrogram\n",
                            frame_count, msg.sample_count);
                 }
@@ -262,7 +276,7 @@ static void waterfall_task(void *pvParameters)
                 /* Compute FFT from buffered audio (but not bins yet) */
                 int fft_result = spectrogram_compute_fft(g_spectrogram_ctx);
                 
-                if (g_micDebug >= 2) {
+                if (g_micDebug >= 7) {
                     printf("[Waterfall] Frame %lu: FFT result=%d\n", frame_count, fft_result);
                 }
                 
@@ -270,6 +284,12 @@ static void waterfall_task(void *pvParameters)
                     /* === Accumulate magnitude-squared spectrum === */
                     /* For each frequency band, sum the magnitude-squared of constituent FFT bins */
                     for (uint32_t bin = 0; bin < WATERFALL_FREQ_BANDS; bin++) {
+                        /* Bounds check: ensure bin is within accumulator array */
+                        if (bin >= WATERFALL_FREQ_BANDS) {
+                            printf("[Waterfall] ERROR: Bin %lu exceeds WATERFALL_FREQ_BANDS (%d)\n", bin, WATERFALL_FREQ_BANDS);
+                            continue;
+                        }
+                        
                         /* Calculate range of FFT bins for this frequency band (same as spectrogram_compute_bins) */
                         uint32_t bin_start = bin * SPECTROGRAM_BIN_SIZE + SPECTROGRAM_BINS_SKIP;
                         uint32_t bin_end = bin_start + SPECTROGRAM_BIN_SIZE;
@@ -284,6 +304,11 @@ static void waterfall_task(void *pvParameters)
                         
                         /* Sum magnitude-squared across all FFT bins in this display band */
                         for (uint32_t i = bin_start; i < bin_end; i++) {
+                            /* Extra safety: bounds check FFT magnitude array */
+                            if (i >= SPECTROGRAM_FFT_SIZE / 2) {
+                                printf("[Waterfall] ERROR: FFT index %lu exceeds max %lu\n", i, SPECTROGRAM_FFT_SIZE / 2);
+                                break;
+                            }
                             int32_t mag = (int32_t)g_spectrogram_ctx->fft_magnitude[i];
                             g_waterfall_magnitude_accum[bin] += (uint64_t)(mag * mag);
                         }
@@ -305,13 +330,23 @@ static void waterfall_task(void *pvParameters)
                         
                         /* Pass accumulated magnitude_sq with gain applied (let log function handle scaling) */
                         for (uint8_t i = 0; i < WATERFALL_FREQ_BANDS; i++) {
+                            /* Bounds check: ensure index is within bar structure */
+                            if (i >= WATERFALL_FREQ_BANDS) {
+                                printf("[Waterfall] ERROR: Bar index %u exceeds WATERFALL_FREQ_BANDS (%d)\n", i, WATERFALL_FREQ_BANDS);
+                                break;
+                            }
+                            if (i >= WATERFALL_FREQ_BANDS) {
+                                printf("[Waterfall] ERROR: Accumulator index %u exceeds array bounds\n", i);
+                                break;
+                            }
+                            
                             /* Apply gain using integer arithmetic: gained = accum[i] * (gain*gain) / 10000 */
                             uint64_t gained = ((uint64_t)g_waterfall_magnitude_accum[i] * g_gainWaterfallSquaredScaled) / 10000;
                             
                             /* Clamp to uint32_t range for display */
                             bar.magnitude_sq[i] = (gained > 0xFFFFFFFFUL) ? 0xFFFFFFFFUL : (uint32_t)gained;
                             
-                            if (g_micDebug >= 2) {
+                            if (g_micDebug >= 7) {
                                 printf("[Waterfall] Band %u: accum=%llu gained=%.2f display=%u\n",
                                        i, g_waterfall_magnitude_accum[i], gained, bar.magnitude_sq[i]);
                             }
@@ -433,14 +468,21 @@ lv_obj_t * waterfall_init(void)
 /**
  * Helper function: Convert magnitude-squared to amplitude level (0-15)
  * Uses logarithmic lookup table for perceptually uniform levels
+ * Includes bounds checking to prevent invalid indexing
  * 
  * @param magnitude_sq Raw magnitude-squared value from FFT
- * @return Amplitude level 0-15
+ * @return Amplitude level 0-15 (guaranteed valid)
  */
 static uint8_t magnitude_sq_to_amplitude_level(uint32_t magnitude_sq)
 {
     /* Find the appropriate level by comparing against thresholds */
     for (uint8_t level = 15; level > 0; level--) {
+        /* Bounds check: ensure level is within LUT array (should always be true in this loop) */
+        if (level >= 16) {
+            printf("[Waterfall] ERROR: Level %u exceeds LUT bounds\n", level);
+            continue;
+        }
+        
         if (magnitude_sq >= power_threshold_log_lut[level]) {
             return level;
         }
@@ -452,13 +494,25 @@ static uint8_t magnitude_sq_to_amplitude_level(uint32_t magnitude_sq)
  * Convert amplitude level to magnitude_sq value
  * Used by parser for manual control - maps color_index to corresponding magnitude_sq
  * The mapping follows the log thresholds: color n requires magnitude_sq >= threshold[n]
+ * Includes bounds checking to prevent invalid LUT access
  */
 uint32_t waterfall_color_index_to_magnitude_sq(uint8_t color_index)
 {
+    /* Bounds check: ensure index is within LUT array (0-15) */
+    if (color_index >= 16) {
+        printf("[Waterfall] ERROR: color_index %u exceeds valid range (0-15), clamping\n", color_index);
+        color_index = 15;
+    }
+    
     if (color_index == 0) {
         return 0;  /* Level 0: magnitude_sq < threshold[0] */
     } else if (color_index < 16) {
         /* Return the threshold value for this color level */
+        /* Extra safety check before indexing */
+        if (color_index >= 16) {
+            printf("[Waterfall] ERROR: color_index %u out of bounds after check\n", color_index);
+            return power_threshold_log_lut[15];
+        }
         return power_threshold_log_lut[color_index];
     } else {
         /* Clamp to maximum color level */
@@ -515,8 +569,20 @@ void waterfall_add_column(lv_obj_t *canvas, const t_waterfallBar *bar)
     
     /* Process each of the 16 frequency bins */
     for (uint8_t freq_bin = 0; freq_bin < WATERFALL_FREQ_BANDS; freq_bin++) {
+        /* Bounds check: ensure freq_bin is valid */
+        if (freq_bin >= WATERFALL_FREQ_BANDS) {
+            printf("[Waterfall] ERROR: freq_bin %u exceeds WATERFALL_FREQ_BANDS (%d)\n", freq_bin, WATERFALL_FREQ_BANDS);
+            break;
+        }
+        
         /* Convert magnitude-squared to amplitude level using log lookup table */
         uint8_t amplitude_level = magnitude_sq_to_amplitude_level(bar->magnitude_sq[freq_bin]);
+        
+        /* Bounds check: ensure amplitude_level is valid for colormap (0-15) */
+        if (amplitude_level >= 16) {
+            printf("[Waterfall] ERROR: amplitude_level %u exceeds colormap range (0-15)\n", amplitude_level);
+            amplitude_level = 15;  /* Clamp to maximum */
+        }
         
         /* Get RGB color for this amplitude level and convert using LVGL */
         Colormap rgb = g_colormap16[amplitude_level];
@@ -526,9 +592,27 @@ void waterfall_add_column(lv_obj_t *canvas, const t_waterfallBar *bar)
         uint16_t row_start = freq_bin * WATERFALL_BAR_HEIGHT;
         uint16_t row_end = row_start + WATERFALL_BAR_HEIGHT;
         
+        /* Bounds check: ensure row_end doesn't exceed canvas height */
+        if (row_end > WATERFALL_HEIGHT) {
+            printf("[Waterfall] ERROR: row_end %u exceeds WATERFALL_HEIGHT (%u)\n", row_end, WATERFALL_HEIGHT);
+            row_end = WATERFALL_HEIGHT;  /* Clamp to canvas bounds */
+        }
+        
         /* Draw this frequency band across all WATERFALL_X_GRANULARITY columns */
         for (uint16_t row = row_start; row < row_end; row++) {
+            /* Extra safety: bounds check row coordinate */
+            if (row >= WATERFALL_HEIGHT) {
+                printf("[Waterfall] ERROR: row %u exceeds WATERFALL_HEIGHT (%u), stopping draw\n", row, WATERFALL_HEIGHT);
+                break;
+            }
+            
             for (uint16_t col = col_start; col < WATERFALL_WIDTH; col++) {
+                /* Extra safety: bounds check col coordinate */
+                if (col >= WATERFALL_WIDTH) {
+                    printf("[Waterfall] ERROR: col %u exceeds WATERFALL_WIDTH (%u)\n", col, WATERFALL_WIDTH);
+                    break;
+                }
+                
                 /* Use LVGL's lv_canvas_set_px with full opacity */
                 lv_canvas_set_px(canvas, col, row, color, LV_OPA_COVER);
             }
@@ -551,12 +635,9 @@ void waterfall_destroy(lv_obj_t *canvas)
         return;
     }
     
-    /* Delete the waterfall task if it exists */
-    if (g_waterfall_task_handle != NULL) {
-        vTaskDelete(g_waterfall_task_handle);
-        g_waterfall_task_handle = NULL;
-        printf("Waterfall task deleted\n");
-    }
+    /* NOTE: Do NOT delete the waterfall task here. */
+    /* The task self-deletes via shutdown flag in waterfall_server_stop(). */
+    /* Attempting to delete from another task is unsafe and causes FreeRTOS corruption. */
     
     /* Free canvas buffer */
     if (g_canvas_buffer != NULL) {
@@ -737,4 +818,95 @@ void waterfall_set_colormap(uint32_t index)
 uint32_t waterfall_get_colormap(void)
 {
     return g_colormapIndex;
+}
+
+/* ==================== Waterfall Server Interface (similar to UDP server) ==================== */
+
+/* Waterfall server state */
+static int g_waterfall_server_running = 0;
+
+/**
+ * Start the waterfall display server
+ * Initializes the display canvas and processing task
+ * Called from parser on "enableWaterfall" command
+ * 
+ * @return 0 on success, -1 on failure
+ */
+int waterfall_server_start(void)
+{
+    if (g_waterfall_server_running) {
+        printf("Waterfall Server: Already running\n");
+        return -1;
+    }
+    
+    printf("Waterfall Server: Starting...\n");
+    
+    /* Reset shutdown flag to allow new task to run */
+    g_waterfall_server_shutdown = 0;
+    
+    /* Initialize the waterfall display and create processing task */
+    lv_obj_t *canvas = waterfall_init();
+    if (canvas == NULL) {
+        printf("Waterfall Server: ERROR - Failed to initialize display\n");
+        return -1;
+    }
+    
+    g_waterfall_server_running = 1;
+    printf("Waterfall Server: Started successfully\n");
+    return 0;
+}
+
+/**
+ * Stop the waterfall display server
+ * Signals the task to shutdown gracefully (task deletes itself)
+ * Called from parser on "disableWaterfall" command
+ * 
+ * IMPORTANT: Does NOT directly call vTaskDelete (unsafe from another task).
+ * Instead signals the waterfall_task to self-destruct via g_waterfall_server_shutdown flag.
+ */
+void waterfall_server_stop(void)
+{
+    if (!g_waterfall_server_running) {
+        return;
+    }
+    
+    printf("Waterfall Server: Stopping...\n");
+    
+    /* Signal the task to shutdown gracefully */
+    g_waterfall_server_shutdown = 1;
+    
+    /* Wait briefly for task to self-delete */
+    /* Give it 100ms to exit cleanly */
+    for (int i = 0; i < 10; i++) {
+        if (g_waterfall_task_handle == NULL) {
+            printf("Waterfall task self-destructed cleanly\n");
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    
+    /* If task didn't exit, something is wrong */
+    if (g_waterfall_task_handle != NULL) {
+        printf("WARNING: Waterfall task did not self-delete within timeout\n");
+    }
+    
+    /* Destroy the display canvas */
+    lv_obj_t *canvas = waterfall_get_canvas();
+    if (canvas != NULL) {
+        waterfall_destroy(canvas);
+    }
+    
+    g_waterfall_server_running = 0;
+    printf("Waterfall Server: Stopped\n");
+}
+
+/**
+ * Check if waterfall server is running
+ * External code (e.g., microphone.c) uses this to determine if waterfall task exists
+ * 
+ * @return 1 if running, 0 if stopped
+ */
+int waterfall_server_is_running(void)
+{
+    return g_waterfall_server_running;
 }

@@ -1,6 +1,8 @@
 #include <pico/stdlib.h>
 #include <pico/time.h>
 #include <pico/status_led.h>
+#include <hardware/uart.h>
+#include <hardware/regs/uart.h>
 #include <stdio.h>
 #include <lvgl.h>
 #include "FreeRTOS.h"
@@ -13,7 +15,9 @@
 #include "microphone.h"
 #include "network.h"
 #include "tcp_server.h"
+#if 0
 #include "waterfall.h"
+#endif
 #include "spectrogram.h"
 
 
@@ -21,6 +25,9 @@
 /**
  * Global variables
  */
+/* Character input queue - populated by UART RX interrupt */
+static QueueHandle_t g_CharQueue = NULL;
+
 /* LVGL display handle */
 static lv_display_t *display;
 
@@ -79,6 +86,7 @@ static uint32_t lvgl_tick_cb(void){
  * Event-driven: sleeps when idle, wakes when timers are scheduled
  * Timers are created on-demand by parser/widgets, not continuously running
  */
+#if 0
 static uint32_t last_tick_time = 0;
 
 static void timer_task(void *parameters)
@@ -102,20 +110,31 @@ static void timer_task(void *parameters)
         return;
     }
     printf("LVGL initialized\n");
+    fflush(stdout);
 
-    
+    printf("About to create initial screen...\n");
+    fflush(stdout);
     
     // Create initial screen with widgets
     create_initial_screen();
+    
+    printf("Initial screen created\n");
+    fflush(stdout);
 
     // Force an invalidation of the screen to trigger display refresh
+    printf("Invalidating screen...\n");
+    fflush(stdout);
+    
     lv_obj_invalidate(lv_screen_active());
+    
+    printf("Forcing immediate refresh...\n");
+    fflush(stdout);
     
     // Try to force a refresh immediately
     lv_refr_now(NULL);
     
-    // Note: Timers are now created on-demand by parser when widgets animate
-    // No dummy timer needed - system is event-driven
+    printf("Screen setup complete\n");
+    fflush(stdout);
 
 
     if(g_LvglMutex == NULL) {
@@ -176,9 +195,26 @@ static void blinker_task(void *parameters)
         state = !state;
     }
 }
+#endif  // #ifdef(0) - Timer and Blinker tasks disabled
+
+/**
+ * UART RX Callback - called from interrupt context
+ * Reads all available characters from UART FIFO and feeds them into the character queue
+ */
+static void uart_rx_callback(void) {
+    /* Read all available characters from UART RX FIFO */
+    while (uart_is_readable(uart0)) {
+        int ch = uart_getc(uart0);  /* Read directly from FIFO (non-blocking) */
+        if (ch != PICO_ERROR_TIMEOUT) {
+            /* Send character to queue from ISR context */
+            xQueueSendFromISR(g_CharQueue, &ch, NULL);
+        }
+    }
+}
 
 /**
  * USB Command Task - reads commands from USB and parses them
+ * Blocks on character queue - yields CPU when no input available
  */
 static void parser_task(void *parameters)
 {
@@ -192,12 +228,10 @@ static void parser_task(void *parameters)
     fflush(stdout);
     
     while (1) {
-        // Read a character with short timeout (1ms) to allow task yielding
-        // getchar_timeout_us returns the character if available, or PICO_ERROR_TIMEOUT
-        ch = getchar_timeout_us(1000);  // 1ms timeout (was 100ms - caused busy-wait)
-        
-        if (ch != PICO_ERROR_TIMEOUT) {
-            // Character received
+        // Block indefinitely until a character arrives (yields CPU to other tasks)
+        // Uses interrupt-driven input via UART RX callback
+        if (xQueueReceive(g_CharQueue, &ch, portMAX_DELAY) == pdTRUE) {
+            // Character received from queue
             if (ch == '\n' || ch == '\r') {
                 // End of line - process command
                 if (buffer_idx > 0) {
@@ -223,9 +257,6 @@ static void parser_task(void *parameters)
                 printf("%c", ch);
                 fflush(stdout);
             }
-        } else {
-            // No character available
-            vTaskDelay(pdMS_TO_TICKS(10));
         }
     }
 }
@@ -240,6 +271,22 @@ int main(void)
     sleep_ms(100);  // Give UART time to initialize
     printf("Vibecode4 - FreeRTOS with LVGL\n");
     printf("Initializing FreeRTOS...\n");
+    
+    // Create character input queue for UART RX
+    // Populated by interrupt handler, consumed by parser_task
+    g_CharQueue = xQueueCreate(64, sizeof(int));
+    if (g_CharQueue == NULL) {
+        printf("Failed to create character input queue\n");
+        return 1;
+    }
+    printf("Character input queue created\n");
+    
+    // Setup UART RX interrupt to feed characters into queue
+    // Enable RX interrupt in UART0 hardware (stdio doesn't do this by default)
+    uart_set_irq_enables(uart0, true, false);  /* Enable RX IRQ, disable TX IRQ */
+    irq_set_exclusive_handler(UART0_IRQ, uart_rx_callback);
+    irq_set_enabled(UART0_IRQ, true);
+    printf("UART RX interrupt configured for interrupt-driven input\n");
     
     wifi_init();
 
@@ -273,6 +320,7 @@ int main(void)
     }
     printf("Spectrogram initialized successfully\n");
 
+#if 0
     // Timer task - LVGL display management (SPI I/O heavy)
     // Pin to Core 1 to prevent SPI transfers from blocking audio on Core 0
     const UBaseType_t core_1_affinity_timer = (1 << 1);  /* Core 1 only */
@@ -290,8 +338,10 @@ int main(void)
         return 1;
     }
     printf("Timer task created on Core 1\n");
+#endif  // #ifdef(0) - Timer task disabled
+
     // Blinker task - medium priority
-    #if(1)
+    #if 0
     result = xTaskCreate(
         blinker_task,
         "BlinkerTask",
@@ -305,7 +355,7 @@ int main(void)
         printf("Failed to create blinker task\n");
         return 1;
     }
-    #endif
+    #endif  // #ifdef(0) - Blinker task disabled
     #if(1)
     // Parser task - lower priority
     result = xTaskCreate(
@@ -380,10 +430,14 @@ int main(void)
     #endif
 
     /* Attach spectrogram processor to waterfall display */
+#if 0
     printf("Attaching spectrogram to waterfall task...\n");
+    fflush(stdout);
     waterfall_set_spectrogram(&g_spectrogram);
+#endif  // #ifdef(0) - Waterfall disabled
 
     printf("Starting FreeRTOS scheduler...\n");
+    fflush(stdout);
     vTaskStartScheduler();
     
     // Should never reach here

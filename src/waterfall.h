@@ -16,6 +16,11 @@
 #include <lvgl.h>
 #include "spectrogram.h"
 
+/* Forward declare the FreeRTOS task handle as an opaque type */
+/* This avoids including FreeRTOS.h which can cause initialization order issues */
+struct tskTaskControlBlock;
+typedef struct tskTaskControlBlock* TaskHandle_t;
+
 /* Display dimensions */
 #define WATERFALL_WIDTH    320      /* Horizontal pixels (time axis) */
 #define WATERFALL_HEIGHT   240      /* Vertical pixels (frequency axis) */
@@ -167,5 +172,36 @@ void waterfall_set_colormap(uint32_t index);
  * @return Current colormap index (0=Jet, 1=Parula)
  */
 uint32_t waterfall_get_colormap(void);
+
+/**
+ * Waterfall task handle - NULL if waterfall task not running
+ * Check this to determine if waterfall display is active
+ * External code (e.g., microphone.c) should only queue data if this is non-NULL
+ */
+extern TaskHandle_t g_waterfall_task_handle;
+
+/**
+ * Start the waterfall display server
+ * Initializes display canvas and creates processing task
+ * Mirrors UDP server interface for consistency
+ * 
+ * @return 0 on success, -1 on failure
+ */
+int waterfall_server_start(void);
+
+/**
+ * Stop the waterfall display server
+ * Destroys display canvas and stops processing task
+ * Mirrors UDP server interface for consistency
+ */
+void waterfall_server_stop(void);
+
+/**
+ * Check if waterfall server is running
+ * Used by microphone task to determine if queueing data is safe
+ * 
+ * @return 1 if running, 0 if stopped
+ */
+int waterfall_server_is_running(void);
 
 #endif /* WATERFALL_H */

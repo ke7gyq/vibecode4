@@ -56,7 +56,7 @@
  * ===== Debug Configuration =====
  * MIC_TRACE: Minimum g_micDebug level to enable trace output
  */
-#define MIC_TRACE 2
+#define MIC_TRACE 5  /* Raised from 2: buffer full only at verbose mode */
 
 /* ==================== PDM Microphone Library API ==================== */
 
@@ -181,6 +181,27 @@ extern AudioBuffers_t g_audioBuffers;
  * Waited by consumer task
  */
 extern SemaphoreHandle_t g_audioReadySemaphore;
+
+/**
+ * Binary semaphore for UDP audio frame ready signal
+ * Posted by microphone task when UDP frame is ready
+ * Waited by UDP audio task
+ */
+extern SemaphoreHandle_t g_audioSemaphoreUDP;
+
+/**
+ * Current buffer data for UDP task (set by microphone, read by UDP)
+ * When semaphore is given, UDP task reads these variables
+ */
+extern int16_t *g_current_udp_buffer;
+extern uint32_t g_current_udp_sample_count;
+extern uint32_t g_current_udp_sequence;
+
+/**
+ * UDP task ready flag - set when UDP task is waiting for next frame
+ * Microphone checks this before giving semaphore (prevents race condition)
+ */
+extern volatile uint8_t g_udp_task_ready;
 
 /**
  * Message queue structure for audio buffer notifications

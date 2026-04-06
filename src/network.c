@@ -9,6 +9,7 @@
 #include "FreeRTOS.h"
 #include "task.h"
 #include "network.h"
+#include "microphone.h"  /* For g_micDebug flag */
 
 // lwIP includes
 #include "lwip/netif.h"
@@ -283,6 +284,34 @@ int network_is_connected(void) {
 }
 
 /**
+ * Get current WiFi connection RSSI (signal strength)
+ */
+int network_get_rssi(void) {
+    // Only return RSSI if we are connected
+    if (network_is_connected() != 1) {
+        return -999;  // Not connected
+    }
+    
+    // Query RSSI from cyw43 driver
+    // Note: This is a simple implementation; actual RSSI may require 
+    // additional cyw43 API calls or ioctl commands
+    int rssi = -999;
+    
+    // Try to get RSSI using cyw43 - may not work on all platforms
+    // For RP2350 with CYW43, we might need to use a dedicated IOCTL
+    // For now, return -999 to indicate not available, but we can improve this
+    // if the cyw43 driver has a public RSSI query function
+    
+    // TODO: Check cyw43 documentation for RSSI query method
+    // Common approaches:
+    // 1. cyw43_wifi_get_rssi() - if available
+    // 2. ioctl(CYW43_GET_RSSI, ...) - if available  
+    // 3. Status from WiFi scan results - if connected to recently scanned AP
+    
+    return rssi;
+}
+
+/**
  * WiFi network task
  * Polls WiFi status and lwIP timers in background
  */
@@ -293,14 +322,17 @@ void network_task(void *parameters) {
     
     // Periodic polling loop
     uint32_t last_check = to_ms_since_boot(get_absolute_time());
+    uint32_t poll_count = 0;
+    uint32_t last_diagnostic = to_ms_since_boot(get_absolute_time());
     
     while (1) {
         // Poll WiFi driver to process events (includes lwIP integration)
         // In pico_cyw43_arch_lwip_poll mode, cyw43_arch_poll() handles both 
         // WiFi driver and lwIP timer updates automatically
         cyw43_arch_poll();
+        poll_count++;
         
-        // Every second, check connection status and scan timeout
+        // Every 1 second, check connection status and scan timeout
         uint32_t now = to_ms_since_boot(get_absolute_time());
         
         if ((now - last_check) >= 1000) {
@@ -319,6 +351,16 @@ void network_task(void *parameters) {
                 // Check if connection succeeded
                 network_is_connected();
             }
+        }
+        
+        // Every 5 seconds, print poll diagnostics
+        if ((now - last_diagnostic) >= 5000) {
+            last_diagnostic = now;
+            if (g_micDebug >= 2) {
+                printf("[NETWORK] Poll frequency: %lu polls/5s (every %.1fms avg)\n", 
+                       poll_count, poll_count > 0 ? 5000.0f / poll_count : 0.0f);
+            }
+            poll_count = 0;
         }
         
         // Small delay - 20ms for responsive lwIP/DHCP polling

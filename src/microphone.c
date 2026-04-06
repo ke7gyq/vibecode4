@@ -1,6 +1,8 @@
 #include "microphone.h"
 #include "microphone_config.h"
 #include "OpenPDMFilter.h"
+#include "tcp_server.h"
+#include "waterfall.h"
 #include "pico/stdlib.h"
 #include "hardware/gpio.h"
 #include "hardware/pio.h"
@@ -15,6 +17,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdatomic.h>
 
 /**
  * Compile-time switch between real microphone and test data
@@ -71,9 +74,25 @@ uint8_t g_micDebug = 0;  /* Microphone debug level: 0=OFF, 2+=ON */
 /* Binary semaphore signaled when audio buffer is ready */
 SemaphoreHandle_t g_audioReadySemaphore = NULL;
 
+/* Binary semaphore for UDP audio frame ready signal */
+SemaphoreHandle_t g_audioSemaphoreUDP = NULL;
+
+/* Current buffer data for UDP task (updated by microphone, read by UDP) */
+int16_t *g_current_udp_buffer = NULL;
+uint32_t g_current_udp_sample_count = 0;
+uint32_t g_current_udp_sequence = 0;
+
+/* UDP task ready flag - set when UDP task is waiting on semaphore for next frame */
+/* Microphone checks this before giving semaphore (prevents race condition) */
+volatile uint8_t g_udp_task_ready = 1;  /* Start as 1 since UDP task begins waiting */
+
 /* Message queues for audio buffer distribution */
 QueueHandle_t g_audioQueueUDP = NULL;
 QueueHandle_t g_audioQueueWaterfall = NULL;
+
+/* Initialization synchronization - blocks consumer tasks until audio system is ready */
+/* Prevents race condition during debugger attachment when tasks might run out of order */
+static SemaphoreHandle_t g_audioInitSemaphore = NULL;
 
 /* Message sequence counter - incremented with each buffer ready notification */
 static uint32_t g_audioMessageSequence = 0;
@@ -490,27 +509,50 @@ void microphone_task(void *parameters)
                     .timestamp_ms = to_ms_since_boot(get_absolute_time())
                 };
                 
-                /* Queue for UDP task (using xQueueSend - task context, not ISR) */
-                if (g_audioQueueUDP != NULL) {
-                    /* Use 5ms timeout to yield CPU if queue is full, allowing consumers to drain */
-                    if (xQueueSend(g_audioQueueUDP, &msg, pdMS_TO_TICKS(5)) == errQUEUE_FULL) {
-                        if (g_micDebug >= 1) {
-                            printf("[Mic] WARNING: UDP queue FULL (seq=%lu dropped)\n", msg.sequence);
+                /* Signal UDP task via semaphore (event-driven) */
+                /* Only signal if UDP server is actually running AND UDP task is ready */
+                if (udp_server_is_running()) {
+                    if (!g_udp_task_ready) {
+                        if (g_micDebug >= 5) {
+                            printf("[Mic] WARNING: UDP task not ready (DROPPED), frame seq=%lu\n", msg.sequence);
                         }
-                    } else if (g_micDebug >= 2) {
-                        printf("[Mic] UDP← seq=%lu buf=%u %u.%u ms\n", 
-                               msg.sequence, msg.buffer_id, msg.timestamp_ms/1000, msg.timestamp_ms%1000);
+                        continue;  /* Skip this frame, UDP task is still busy */
+                    }
+                    
+                    g_udp_task_ready = 0;  /* Mark task as busy (processing this frame) */
+                    
+                    /* Store current buffer info for UDP task to access */
+                    g_current_udp_buffer = p_current_buffer;
+                    g_current_udp_sample_count = pcm_index;
+                    g_current_udp_sequence = msg.sequence;
+                    
+                    /* CRITICAL: Memory barrier to ensure all global writes are visible before semaphore give */
+                    /* This prevents compiler from reordering writes at high optimization levels */
+                    __atomic_thread_fence(__ATOMIC_RELEASE);
+                    
+                    /* Signal semaphore - wake UDP task immediately */
+                    BaseType_t sem_result = xSemaphoreGive(g_audioSemaphoreUDP);
+                    
+                    if (g_micDebug >= 6) {
+                        printf("[Mic] SEM_GIVE: seq=%lu buf=%u samples=%u (ready=%u)\n", 
+                               msg.sequence, msg.buffer_id, pcm_index, g_udp_task_ready);
+                    }
+                    
+                    if (sem_result != pdTRUE && g_micDebug >= 1) {
+                        printf("[Mic] ERROR: xSemaphoreGive failed (seq=%lu)\n", msg.sequence);
                     }
                 }
                 
                 /* Queue for Waterfall task (using xQueueSend - task context, not ISR) */
-                if (g_audioQueueWaterfall != NULL) {
+                /* CRITICAL: Only send if waterfall server is actually running */
+                /* Check waterfall_server_is_running() to prevent microphone from blocking on zombie queue */
+                if (g_audioQueueWaterfall != NULL && waterfall_server_is_running()) {
                     /* Use 5ms timeout to yield CPU if queue is full, allowing consumers to drain */
                     if (xQueueSend(g_audioQueueWaterfall, &msg, pdMS_TO_TICKS(5)) == errQUEUE_FULL) {
-                        if (g_micDebug >= 1) {
+                        if (g_micDebug >= 5) {
                             printf("[Mic] WARNING: Waterfall queue FULL (seq=%lu dropped)\n", msg.sequence);
                         }
-                    } else if (g_micDebug >= 2) {
+                    } else if (g_micDebug >= 6) {
                         printf("[Mic] WTF← seq=%lu buf=%u %u.%u ms\n",
                                msg.sequence, msg.buffer_id, msg.timestamp_ms/1000, msg.timestamp_ms%1000);
                     }
@@ -601,18 +643,17 @@ bool microphone_init(void)
     memset(&g_audioBuffers, 0, sizeof(g_audioBuffers));
     g_audioReady = 0;
     
-    /* Create message queues for audio buffer distribution */
-    /* Queue depth: 4 messages (allows some buffering if consumer is slow) */
-    printf("[Mic] Initializing audio queue system...\n");
+    printf("[Mic] Initializing audio signaling system...\n");
     
-    g_audioQueueUDP = xQueueCreate(4, sizeof(AudioBufferMessage_t));
-    if (g_audioQueueUDP == NULL) {
-        printf("ERROR: Failed to create UDP audio queue\n");
+    /* Create binary semaphore for UDP task event-driven signaling */
+    g_audioSemaphoreUDP = xSemaphoreCreateBinary();
+    if (g_audioSemaphoreUDP == NULL) {
+        printf("ERROR: Failed to create UDP audio semaphore\n");
         return false;
     }
-    printf("[Mic] UDP audio queue created (depth=4, msg_size=%u bytes)\n", 
-           (unsigned int)sizeof(AudioBufferMessage_t));
+    printf("[Mic] UDP audio semaphore created (binary, event-driven)\n");
     
+    /* Keep queue for Waterfall (not changed yet) */
     g_audioQueueWaterfall = xQueueCreate(4, sizeof(AudioBufferMessage_t));
     if (g_audioQueueWaterfall == NULL) {
         printf("ERROR: Failed to create Waterfall audio queue\n");
@@ -746,24 +787,32 @@ void initialize_pdm_clock(void)
     
     uint offset = pio_add_program(pio, &pdm_clock_program);
     printf("[PDM Clock Init] PIO program loaded at offset %u\n", offset);
+    fflush(stdout);
 
     /* Initialize and start with both GPIO pins */
-    pdm_clock_program_init(pio, sm, offset, clk_div,data_pin, clk_pin);
+    printf("[PDM Clock Init] About to call pdm_clock_program_init()...\n");
+    fflush(stdout);
+    
+    pdm_clock_program_init(pio, sm, offset, clk_div, data_pin, clk_pin);
+    
+    printf("[PDM Clock Init] pdm_clock_program_init() returned\n");
+    fflush(stdout);
+    
+    printf("[PDM Clock Init] Enabling PIO state machine...\n");
+    fflush(stdout);
+    
     pio_sm_set_enabled(pio, sm, true);
     
+    printf("[PDM Clock Init] State machine enabled\n");
+    fflush(stdout);
     printf("[PDM Clock Init] GPIO6 reads data (input)\n");
     printf("[PDM Clock Init] System clock: %lu Hz\n", sys_clock_hz);
     printf("[PDM Clock Init] Target PDM: %.0f Hz (3.072 MHz)\n", target_pdm_hz);
     printf("[PDM Clock Init] Clock divider: %.6f\n", clk_div);
     printf("[PDM Clock Init] Actual PDM: %.0f Hz (%.2f%% error)\n", actual_pdm_hz, ((actual_pdm_hz / target_pdm_hz) - 1.0) * 100);
     printf("[PDM Clock Init] Clock runs continuously - no shutdown needed\n");
-    printf("[PDM Clock Init] Running initialization test for 5 seconds...\n");
-    
-    /* Run initialization test for 5 seconds to allow settling */
-    // sleep_ms(5000);
-    
-    /* Clock continues running - microphone_task will handle GPIO reading */
     printf("[PDM Clock Init] Initialization complete - clock running continuously\n\n");
+    fflush(stdout);
 }
 
 

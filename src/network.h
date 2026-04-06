@@ -67,6 +67,12 @@ int network_connect(const char *ssid, const char *password);
 int network_is_connected(void);
 
 /**
+ * Get current WiFi connection RSSI (signal strength)
+ * @return RSSI in dBm (negative value), or -999 if not connected
+ */
+int network_get_rssi(void);
+
+/**
  * WiFi network task - call periodically to process WiFi events
  * @param parameters Unused FreeRTOS parameter
  */
