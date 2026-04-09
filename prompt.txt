@@ -153,3 +153,119 @@ returns gain value which is allocated as uint32_t g_gainWaterfall = 10. The Sett
 computes a powergain value, called float32_t g_gainWaterfallSquared, is calculated as 
 squared ( g_gainWaterfall/waterfallAccumulationCount) For each of the frequency bins, multiply the frequency bin value by this 
 comptued value before determining the color value
+
+
+
+I have written some optimized waterfall display code for the vibecode4 project that I want to integrate into the project. The interfaces should be pretty
+straight forwared.
+
+The following events need to happen. They are defined in st7789.h
+    st7789_lcd_init();
+    st7789_setVerticalMode();
+    st7789_setScrollMargins(0, 0);
+
+Defined in waterfall.c
+    clearDisplay();
+
+The function addBar takes an array of 24 uint16_t values, where each of the 24
+enteries represents an value that will be converted to a color that will be displayed. THe color values are used as an index into a colormap table, where the table has 16 enteries, meaning that the values of the amplitudes are integer values that range from 1 to 16. The function addBar takes two pramaters, this index of uint16_values and a count of the number of values passed, which should be 24,
+or the constat defined as "PIXELS_PER_BAR"
+
+You will have to merge the waterfall st7789 code into the vibecode4 code base. The new code has changed some of the constants so that the display properly displays RGB565 encoded pixel data, where the pixel data is presented in little endian order. Please make adjustments if necessary to what LVGL is expecting.
+
+The code can be found in the ../waterfall directory. Please take a look at it
+and let me know what difficulties you forsee in merging the code into waterfall 4.
+
+You will need to add a setter/getter functon to the parser that allows changes to the colormap index.
+
+
+I want to clarify some items.
+1) Waterfall code is giving the correct colors on the display. The byte ordering and endian issues are not a proble.m
+2) When in waterfall mode, the display is being used exclusively by waterfall. LVGL should not be making any calls to the display. It is acceptable to disable LVGL while waterfall is active. YOu know when waterfall is active because the user activates it through the UI.
+3) The bar updates on waterfall are very fast. Currently, we take a batch of 100 FFT's add them together, take the log of the amplitudes, and calculate the index of the log. Those indexes are used to look up a color in a colormap table. Waterfall intercepts this processing, provide the same indexes to waterfall that hyou are currently providing. Divide the frequency scale into 24 bins, create an array of uint16_t and pass it to waterfall.
+4) I am more concerned with getting waterfall working thatn I am with LVGL. We can switch modes if necessary to get LVGL working.
+5) I would have waterfall hold the current LVGL semaphore to prevent LVGL from oprationg. It is acceptable to re-initialize the screen when entering and leaving waterfall.
+
+Please let me know what else needs to be clarified.
+
+
+Is it possible to disable optimizations on a per file level. Lets disable
+optimizatons for those files that have memory barriers. In particularr, I want
+optimizations on the FFT and filtering routines. I'm thinking that we can
+compile at the O3 level for everything except the RTOS scheduler and any
+other files that use memory barriers. 
+
+I am not seeing the definition for whiteBar in waterfall.c. The function clearDisplay needs it.
+I would like a test function that draws the individual bar colors added to the parser.
+Model this function after testWaterfall in the /waterfall/waterfall_test.c.
+Include the definitins for blueBar, greenBar, redBar and whithBar in waterfall.c.
+Make this test function callable from the parser.
+
+Previously, were was the waterfallGain Function applied? It needs to be applied to the output of
+the FFT, before we take the log of the results, and form the indexes into the color table. I think
+that waterfall gain should be moved to spectrogram.c
+
+
+Please use the following algorythimn to compute the index values for the color map:
+Output of the FFT produces 512 complex numbers. Begin by:
+
+We will accumulate some number N ( start with 100) FFT samples.
+let M be the number of outputs given by the FFT. (say 512)
+let accmArray = an array of output samples. 512 uint32 values.
+
+for (cnt=0, cnt < N ; cnt ++ ){
+    if (cnt==0)
+       set all values of accmArray = 0
+
+     for each value of the FFT output array, compute the magnitude squared value:
+     use the follow to compute it: 
+     	 Calculate the magnitude square for each of the complex numbers. Use either a
+	 library function, or calculate it by taking the ( real part squared ) - (imaginary part square).
+	 call this result magSquared
+
+      add MagSquared to accmArray.
+      	  accmArray[cnt] += magSquared
+}
+
+Create an array of uint32 badchedArray [ PIXELS_PER_BAR]. We're going to batch the results of accmArray into
+this batchedArray. Use an algorytinm simular to this:
+
+pixelsInBar = floor (sizeof(accmArray)/ PIXELS_PER_BAR;
+uint32_t batchedArray = {0}
+uint16_t powerIndex = 0;
+for ( pixelNumber = 0 ; pixelNumber < PIXELS_PER_BAR ; pixelNumber ++ ){
+    for ( cnt = 0 ; cnt < pixelsInBar ; cnt ++ )
+    	batchedArray  [ pixelNumber]  += accmArray[powerIndex++]
+    batchedArray [pixelNumber] *= gain_squared
+
+Create an array of uint16_t logAccmPower[ PIXELS_PER_BAR] and use the lookup table that you previously defined.
+Let:
+for ( powerIndex = 0 ; powerIndex < PIXELS_PER_BAR ; powerIndex ++ )
+    logAccmPower [ powerIndex ] = (lookup log from perviously calculate table) ( batchedArray [ powerIndex]
+
+
+Note that the above steps can be consolidated.
+
+pass the results  on to drawBar in waterfall.c ie drawbar ( logAccmPower, PIXELS_PER_BAR)
+
+
+
+The logAccmLookup Table is incorrect. It should be :
+
+logAccmLookup [COLORMAP_SIZE] = {
+	      0 << 16 , 1  << 16  , 2 << 16  , 4 << 16  ,
+	      8 << 16 , 16 << 16  , 32 << 16  , 64 << 16  ,
+	      128 << 16,  256  << 16  , 512 << 16  , 1024<< 16 ,
+	      2048 << 16  , 4096 << 16  , 8192 << 16  , 16384 << 16 , 32768<< 16 
+	      }
+    	
+
+Compute the logPower value using the following. Compute this for each value of batchedArray.
+
+powerSequared = batchedArray[ idx ] 
+
+for ( logPower  = COLORMAP_SIZE-1  ; logPower  >= 0 ; logPower  -- )
+    if ( logAccmLookup [ logPower ] <= powerSquared )
+       break
+
+:

@@ -13,6 +13,7 @@
 #include "parser.h"
 #include "widgets.h"
 #include "microphone.h"
+#include "waterfall.h"
 #include "network.h"
 #include "tcp_server.h"
 #if 0
@@ -32,7 +33,7 @@ static QueueHandle_t g_CharQueue = NULL;
 static lv_display_t *display;
 
 /* Spectrogram processor context for FFT and frequency analysis */
-static spectrogram_t g_spectrogram;
+spectrogram_t g_spectrogram;
 
 /* FreeRTOS synchronization */
 SemaphoreHandle_t g_LvglMutex;
@@ -269,6 +270,8 @@ int main(void)
 
     stdio_init_all();
     sleep_ms(100);  // Give UART time to initialize
+    st7789_lcd_init();
+
     printf("Vibecode4 - FreeRTOS with LVGL\n");
     printf("Initializing FreeRTOS...\n");
     
@@ -320,6 +323,21 @@ int main(void)
     }
     printf("Spectrogram initialized successfully\n");
 
+    /* Create audio queues BEFORE starting tasks (waterfall_task needs these) */
+    g_audioQueueWaterfall = xQueueCreate(4, sizeof(AudioBufferMessage_t));
+    if (g_audioQueueWaterfall == NULL) {
+        printf("ERROR: Failed to create waterfall audio queue\n");
+        return 1;
+    }
+    printf("Waterfall audio queue created\n");
+
+    g_audioQueueUDP = xQueueCreate(4, sizeof(AudioBufferMessage_t));
+    if (g_audioQueueUDP == NULL) {
+        printf("ERROR: Failed to create UDP audio queue\n");
+        return 1;
+    }
+    printf("UDP audio queue created\n");
+
 #if 0
     // Timer task - LVGL display management (SPI I/O heavy)
     // Pin to Core 1 to prevent SPI transfers from blocking audio on Core 0
@@ -341,7 +359,7 @@ int main(void)
 #endif  // #ifdef(0) - Timer task disabled
 
     // Blinker task - medium priority
-    #if 0
+    #if(0)
     result = xTaskCreate(
         blinker_task,
         "BlinkerTask",
@@ -357,14 +375,16 @@ int main(void)
     }
     #endif  // #ifdef(0) - Blinker task disabled
     #if(1)
-    // Parser task - lower priority
-    result = xTaskCreate(
+    // Parser task - lower priority, pinned to Core 0 for audio/display separation
+    const UBaseType_t core_0_parser = (1 << 0);  /* Core 0 only */
+    result = xTaskCreateAffinitySet(
         parser_task,
         "ParserTask",
         512,
         // 2048,
         NULL,
         2,  /* Priority: handle keyboard input */
+        core_0_parser,  /* Core affinity: Core 0 (isolated from LVGL on Core 1) */
         &parser_handle
     );
     if (result != pdPASS) {
@@ -436,6 +456,48 @@ int main(void)
     waterfall_set_spectrogram(&g_spectrogram);
 #endif  // #ifdef(0) - Waterfall disabled
 
+    /* Create Waterfall Task (Core 1 - isolated display rendering) */
+    const UBaseType_t core_1_waterfall = (1 << 1);  /* Core 1 only */
+    result = xTaskCreateAffinitySet(
+        waterfall_task,       // Task function
+        "WaterfallTask",      // Task name
+        8192,                 // Stack size in words (FFT + signal processing + printf buffers)
+        NULL,                 // Parameters
+        2,                    // Priority: medium (below microphone, same as display)
+        core_1_waterfall,     // Core affinity: Core 1
+        NULL                  // Task handle (not needed)
+    );
+    if (result != pdPASS) {
+        printf("Failed to create waterfall task\n");
+        return 1;
+    }
+    printf("Waterfall task created on Core 1\n");
+
+    /* Create Timer update task on Core 1 (isolated from audio) */
+    const UBaseType_t core_1_affinity = (1 << 1);  /* Core 1 only */
+    result = xTaskCreateAffinitySet(
+        timer_update_task,    // Task function
+        "TimerUpdateTask",    // Task name
+        512,                  // Stack size in words (2KB - small, simple task)
+        NULL,                 // Parameters
+        2,                    // Priority: medium-high (match waterfall task)
+        core_1_affinity,      // Core affinity: Core 1
+        NULL                  // Task handle (not needed)
+    );
+    if (result != pdPASS) {
+        printf("Failed to create timer update task\n");
+        return 1;
+    }
+
+    /* Auto-start UDP server before scheduler to prevent race condition */
+    /* (Eliminates timing window where client connects before server is ready) */
+    printf("Starting UDP audio server...\n");
+    if (udp_server_start() == 0) {
+        printf("UDP server auto-started successfully\n");
+    } else {
+        printf("WARNING: UDP server failed to start (will be unavailable)\n");
+    }
+    
     printf("Starting FreeRTOS scheduler...\n");
     fflush(stdout);
     vTaskStartScheduler();

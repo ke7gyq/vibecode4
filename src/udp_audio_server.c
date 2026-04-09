@@ -1,7 +1,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
-#include <stdatomic.h>
 #include <lwip/udp.h>
 #include <lwip/err.h>
 #include <pico/time.h>
@@ -195,49 +194,46 @@ void udp_audio_task(void *parameters) {
     g_udp_audio_task_handle = xTaskGetCurrentTaskHandle();
     uint32_t frame_count = 0;
     uint32_t take_count = 0;
+    AudioBufferMessage_t msg;
     
     while (1) {
-        /* Signal that we're ready for the next frame */
-        g_udp_task_ready = 1;
-        
         take_count++;
-        /* Event-driven: block forever until microphone signals frame is ready */
-        /* Returns only when xSemaphoreGive() is called by microphone task */
-        BaseType_t sem_result = xSemaphoreTake(g_audioSemaphoreUDP, portMAX_DELAY);
+        /* Event-driven: block forever until microphone sends audio buffer message */
+        /* Returns only when xQueueSend() is called by microphone task */
+        BaseType_t queue_result = xQueueReceive(g_audioQueueUDP, &msg, portMAX_DELAY);
         
-        if (sem_result != pdTRUE) {
+        if (queue_result != pdTRUE) {
             if (g_micDebug >= 1) {
-                printf("[UDP] ERROR: xSemaphoreTake failed\n");
+                printf("[UDP] ERROR: xQueueReceive failed\n");
             }
             continue;
         }
         
-        /* CRITICAL: Memory barrier to ensure all global reads see latest values written by microphone */
-        /* This is the acquire half of the release-acquire pair */
-        __atomic_thread_fence(__ATOMIC_ACQUIRE);
-        
-        /* Semaphore was given - read current buffer info from global variables */
+        /* Message received - extract buffer info from queue message */
+        int16_t *buffer_ptr = msg.buffer_ptr;
+        uint32_t sample_count = msg.sample_count;
+        uint32_t sequence = msg.sequence;
         
         /* Validate buffer pointer */
-        if (g_current_udp_buffer == NULL) {
-            g_audio_samples_dropped += g_current_udp_sample_count;
+        if (buffer_ptr == NULL) {
+            g_audio_samples_dropped += sample_count;
             if (g_micDebug >= 1) {
-                printf("[UDP] ERROR: NULL buffer pointer\n");
+                printf("[UDP] ERROR: NULL buffer pointer (seq=%lu)\n", sequence);
             }
             g_udp_frame_count++;
             continue;
         }
         
         /* Check for missed buffers (sequence numbering) */
-        if (g_udp_last_sequence > 0 && g_current_udp_sequence != g_udp_last_sequence + 1) {
-            uint32_t missed = g_current_udp_sequence - g_udp_last_sequence - 1;
-            g_audio_samples_dropped += missed * g_current_udp_sample_count;
+        if (g_udp_last_sequence > 0 && sequence != g_udp_last_sequence + 1) {
+            uint32_t missed = sequence - g_udp_last_sequence - 1;
+            g_audio_samples_dropped += missed * sample_count;
             if (g_micDebug >= 1) {
                 printf("[UDP] Frame %lu: DROPPED %lu buffers (seq %lu → %lu)\n",
-                       g_udp_frame_count, missed, g_udp_last_sequence, g_current_udp_sequence);
+                       g_udp_frame_count, missed, g_udp_last_sequence, sequence);
             }
         }
-        g_udp_last_sequence = g_current_udp_sequence;
+        g_udp_last_sequence = sequence;
         
         /* Count active clients */
         int active_clients = 0;
@@ -251,7 +247,7 @@ void udp_audio_task(void *parameters) {
         uint32_t frame_send_start = to_ms_since_boot(get_absolute_time());
         
         /* Send the frame */
-        udp_audio_send_frame(g_current_udp_buffer);
+        udp_audio_send_frame(buffer_ptr);
         
         uint32_t frame_send_time = to_ms_since_boot(get_absolute_time()) - frame_send_start;
         
@@ -260,7 +256,7 @@ void udp_audio_task(void *parameters) {
         }
         
         if (g_micDebug >= 6) {
-            printf("[UDP] SEND_COMPLETE: Frame %lu sent\n", g_udp_frame_count);
+            printf("[UDP] SEND_COMPLETE: Frame %lu (seq=%lu) sent\n", g_udp_frame_count, sequence);
         }
         g_udp_frame_count++;
         
@@ -316,6 +312,8 @@ int udp_server_start(void) {
     
     printf("\n========== UDP Audio Server: Starting ==========\n");
     printf("UDP Audio Server: Starting on port %d...\n", UDP_AUDIO_PORT);
+    printf("UDP Audio Server: Using QUEUE-based flow (FreeRTOS queue from microphone)\n");
+    printf("UDP Audio Server: Sending %d samples per buffer\n", AUDIO_BUFFER_SIZE);;
     
     /* DIAGNOSTIC: Log startup conditions BEFORE any allocations */
     printf("[DIAGNOSTIC] Startup conditions (BEFORE):\n");
@@ -344,9 +342,16 @@ int udp_server_start(void) {
     g_udp_last_report_time = 0;     /* Reset report timer */
     
     /* IMPORTANT: Flush stale audio messages from previous run */
-    /* When udpStop/udpStart is called, the queue may contain old messages */
-    /* Semaphore-based system doesn't need flushing */
-    printf("[DIAGNOSTIC] Semaphore system ready (no queue flush needed)\n");
+    /* When udpStop/udpStart is called, the queue may contain old buffered messages */
+    /* Clear these out so UDP task starts fresh */
+    if (g_audioQueueUDP != NULL) {
+        AudioBufferMessage_t stale_msg;
+        while (xQueueReceive(g_audioQueueUDP, &stale_msg, 0) == pdTRUE) {
+            /* Drain queue without blocking */
+        }
+        printf("[DEBUG] UDP queue flushed (queue-based system)\n");
+    }
+    printf("[DIAGNOSTIC] Queue system ready (stale messages cleared)\n");
     printf("[DIAGNOSTIC] Task state reset: last_seq=%lu, frame_count=%lu, skipped=%lu\n",
            g_udp_last_sequence, g_udp_frame_count, g_udp_frames_skipped);
     
@@ -392,7 +397,8 @@ int udp_server_start(void) {
     
     /* DIAGNOSTIC: Log final state AFTER startup completes */
     printf("[DIAGNOSTIC] Startup state (AFTER):\n");
-    printf("  - Semaphore: ready (event-driven)\n");
+    printf("  - Queue: ready (FreeRTOS queue-based)\n");
+    printf("  - UDP queue depth: %u/4\n", (unsigned)uxQueueMessagesWaiting(g_audioQueueUDP));
     printf("  - Active clients: 0 (none connected yet)\n");
     printf("  - Audio PCB: %p\n", (void*)audio_pcb);
     printf("  - Buffer being sent: %u\n", g_current_buffer_being_sent);

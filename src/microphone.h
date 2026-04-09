@@ -183,30 +183,17 @@ extern AudioBuffers_t g_audioBuffers;
 extern SemaphoreHandle_t g_audioReadySemaphore;
 
 /**
- * Binary semaphore for UDP audio frame ready signal
- * Posted by microphone task when UDP frame is ready
- * Waited by UDP audio task
- */
-extern SemaphoreHandle_t g_audioSemaphoreUDP;
-
-/**
- * Current buffer data for UDP task (set by microphone, read by UDP)
- * When semaphore is given, UDP task reads these variables
- */
-extern int16_t *g_current_udp_buffer;
-extern uint32_t g_current_udp_sample_count;
-extern uint32_t g_current_udp_sequence;
-
-/**
- * UDP task ready flag - set when UDP task is waiting for next frame
- * Microphone checks this before giving semaphore (prevents race condition)
- */
-extern volatile uint8_t g_udp_task_ready;
-
-/**
- * Message queue structure for audio buffer notifications
+ * Message queue for audio buffer notifications to UDP task
  * Contains buffer metadata and pointer to audio data
  */
+extern QueueHandle_t g_audioQueueUDP;
+
+/**
+ * Message queue for audio buffer notifications to Waterfall task
+ * Contains buffer metadata and pointer to audio data
+ */
+extern QueueHandle_t g_audioQueueWaterfall;
+
 typedef struct {
     uint8_t buffer_id;              // Buffer ID: 1 or 2
     uint32_t sequence;              // Incrementing sequence number (detects missed buffers)
@@ -220,8 +207,6 @@ typedef struct {
  * Each consumer (UDP, Waterfall) gets independent queue
  * This prevents race conditions and lost notifications
  */
-extern QueueHandle_t g_audioQueueUDP;
-extern QueueHandle_t g_audioQueueWaterfall;
 
 /**
  * Initialize the PDM microphone system

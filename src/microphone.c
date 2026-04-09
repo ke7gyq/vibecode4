@@ -17,7 +17,6 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdatomic.h>
 
 /**
  * Compile-time switch between real microphone and test data
@@ -73,18 +72,6 @@ uint8_t g_micDebug = 0;  /* Microphone debug level: 0=OFF, 2+=ON */
 
 /* Binary semaphore signaled when audio buffer is ready */
 SemaphoreHandle_t g_audioReadySemaphore = NULL;
-
-/* Binary semaphore for UDP audio frame ready signal */
-SemaphoreHandle_t g_audioSemaphoreUDP = NULL;
-
-/* Current buffer data for UDP task (updated by microphone, read by UDP) */
-int16_t *g_current_udp_buffer = NULL;
-uint32_t g_current_udp_sample_count = 0;
-uint32_t g_current_udp_sequence = 0;
-
-/* UDP task ready flag - set when UDP task is waiting on semaphore for next frame */
-/* Microphone checks this before giving semaphore (prevents race condition) */
-volatile uint8_t g_udp_task_ready = 1;  /* Start as 1 since UDP task begins waiting */
 
 /* Message queues for audio buffer distribution */
 QueueHandle_t g_audioQueueUDP = NULL;
@@ -509,53 +496,33 @@ void microphone_task(void *parameters)
                     .timestamp_ms = to_ms_since_boot(get_absolute_time())
                 };
                 
-                /* Signal UDP task via semaphore (event-driven) */
-                /* Only signal if UDP server is actually running AND UDP task is ready */
-                if (udp_server_is_running()) {
-                    if (!g_udp_task_ready) {
+                /* Queue to UDP task (using xQueueSend - task context, not ISR) */
+                /* CRITICAL: Only send if UDP server is actually running */
+                if (g_audioQueueUDP != NULL && udp_server_is_running()) {
+                    /* Use 5ms timeout to yield CPU if queue is full, allowing consumers to drain */
+                    if (xQueueSend(g_audioQueueUDP, &msg, pdMS_TO_TICKS(5)) == errQUEUE_FULL) {
                         if (g_micDebug >= 5) {
-                            printf("[Mic] WARNING: UDP task not ready (DROPPED), frame seq=%lu\n", msg.sequence);
+                            printf("[Mic] WARNING: UDP queue FULL (seq=%lu dropped)\n", msg.sequence);
                         }
-                        continue;  /* Skip this frame, UDP task is still busy */
-                    }
-                    
-                    g_udp_task_ready = 0;  /* Mark task as busy (processing this frame) */
-                    
-                    /* Store current buffer info for UDP task to access */
-                    g_current_udp_buffer = p_current_buffer;
-                    g_current_udp_sample_count = pcm_index;
-                    g_current_udp_sequence = msg.sequence;
-                    
-                    /* CRITICAL: Memory barrier to ensure all global writes are visible before semaphore give */
-                    /* This prevents compiler from reordering writes at high optimization levels */
-                    __atomic_thread_fence(__ATOMIC_RELEASE);
-                    
-                    /* Signal semaphore - wake UDP task immediately */
-                    BaseType_t sem_result = xSemaphoreGive(g_audioSemaphoreUDP);
-                    
-                    if (g_micDebug >= 6) {
-                        printf("[Mic] SEM_GIVE: seq=%lu buf=%u samples=%u (ready=%u)\n", 
-                               msg.sequence, msg.buffer_id, pcm_index, g_udp_task_ready);
-                    }
-                    
-                    if (sem_result != pdTRUE && g_micDebug >= 1) {
-                        printf("[Mic] ERROR: xSemaphoreGive failed (seq=%lu)\n", msg.sequence);
+                    } else if (g_micDebug >= 6) {
+                        printf("[Mic] UDP← seq=%lu buf=%u %u.%u ms\n",
+                               msg.sequence, msg.buffer_id, msg.timestamp_ms/1000, msg.timestamp_ms%1000);
                     }
                 }
                 
                 /* Queue for Waterfall task (using xQueueSend - task context, not ISR) */
-                /* CRITICAL: Only send if waterfall server is actually running */
-                /* Check waterfall_server_is_running() to prevent microphone from blocking on zombie queue */
-                if (g_audioQueueWaterfall != NULL && waterfall_server_is_running()) {
+                if (g_audioQueueWaterfall != NULL) {
                     /* Use 5ms timeout to yield CPU if queue is full, allowing consumers to drain */
-                    if (xQueueSend(g_audioQueueWaterfall, &msg, pdMS_TO_TICKS(5)) == errQUEUE_FULL) {
-                        if (g_micDebug >= 5) {
-                            printf("[Mic] WARNING: Waterfall queue FULL (seq=%lu dropped)\n", msg.sequence);
-                        }
-                    } else if (g_micDebug >= 6) {
-                        printf("[Mic] WTF← seq=%lu buf=%u %u.%u ms\n",
-                               msg.sequence, msg.buffer_id, msg.timestamp_ms/1000, msg.timestamp_ms%1000);
+                    BaseType_t send_result = xQueueSend(g_audioQueueWaterfall, &msg, pdMS_TO_TICKS(5));
+                    if (send_result == errQUEUE_FULL) {
+                        printf("[Mic] ERROR: Waterfall queue FULL (seq=%lu dropped)\n", msg.sequence);
+                    } else if (send_result == pdTRUE) {
+                        /* Message sent successfully - silent */ 
+                    } else {
+                        printf("[Mic] ERROR: xQueueSend failed with code %d\n", send_result);
                     }
+                } else {
+                    printf("[Mic] ERROR: g_audioQueueWaterfall is NULL!\n");
                 }
                 
                 /* Legacy semaphore signal (using xSemaphoreGive - task context, not ISR) */
@@ -645,22 +612,33 @@ bool microphone_init(void)
     
     printf("[Mic] Initializing audio signaling system...\n");
     
-    /* Create binary semaphore for UDP task event-driven signaling */
-    g_audioSemaphoreUDP = xSemaphoreCreateBinary();
-    if (g_audioSemaphoreUDP == NULL) {
-        printf("ERROR: Failed to create UDP audio semaphore\n");
-        return false;
+    /* Create message queue for UDP task (decoupled queue-based signaling) */
+    /* Skip if already created by main (early initialization) */
+    if (g_audioQueueUDP == NULL) {
+        g_audioQueueUDP = xQueueCreate(4, sizeof(AudioBufferMessage_t));
+        if (g_audioQueueUDP == NULL) {
+            printf("ERROR: Failed to create UDP audio queue\n");
+            return false;
+        }
+        printf("[Mic] UDP audio queue created (depth=4, msg_size=%u bytes)\n",
+               (unsigned int)sizeof(AudioBufferMessage_t));
+    } else {
+        printf("[Mic] UDP audio queue already initialized (by main)\n");
     }
-    printf("[Mic] UDP audio semaphore created (binary, event-driven)\n");
     
-    /* Keep queue for Waterfall (not changed yet) */
-    g_audioQueueWaterfall = xQueueCreate(4, sizeof(AudioBufferMessage_t));
+    /* Create message queue for Waterfall task */
+    /* Skip if already created by main (early initialization) */
     if (g_audioQueueWaterfall == NULL) {
-        printf("ERROR: Failed to create Waterfall audio queue\n");
-        return false;
+        g_audioQueueWaterfall = xQueueCreate(4, sizeof(AudioBufferMessage_t));
+        if (g_audioQueueWaterfall == NULL) {
+            printf("ERROR: Failed to create Waterfall audio queue\n");
+            return false;
+        }
+        printf("[Mic] Waterfall audio queue created (depth=4, msg_size=%u bytes)\n",
+               (unsigned int)sizeof(AudioBufferMessage_t));
+    } else {
+        printf("[Mic] Waterfall audio queue already initialized (by main)\n");
     }
-    printf("[Mic] Waterfall audio queue created (depth=4, msg_size=%u bytes)\n",
-           (unsigned int)sizeof(AudioBufferMessage_t));
     
     /* Legacy semaphore - kept for compatibility, but not used by new queue system */
     g_audioReadySemaphore = xSemaphoreCreateBinary();

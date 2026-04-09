@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include "pico/time.h"
 #include "FreeRTOS.h"
 #include "semphr.h"
 #include "task.h"
@@ -12,11 +13,45 @@
 #include "waterfall.h"
 #include "microphone.h"
 #include "spectrogram.h"
+#include "st7789.h"
 
 /* External globals */
 extern SemaphoreHandle_t g_LvglMutex;
 extern uint32_t g_blinkRateMs;
 extern uint8_t g_micDebug;
+
+/* ============== Waterfall Mode Management ============== */
+
+/** Global waterfall mode - controls whether audio task feeds FFT data to waterfall */
+static waterfall_mode_t g_waterfallMode = WATERFALL_MODE_OFF;
+
+/**
+ * Get current waterfall display mode
+ * @return Current mode (OFF, TEST, or LIVE_AUDIO)
+ */
+waterfall_mode_t waterfall_get_mode(void) {
+    return g_waterfallMode;
+}
+
+/**
+ * Set waterfall display mode
+ * @param mode New mode (OFF, TEST, or LIVE_AUDIO)
+ * 
+ * When switching to TEST mode, audio task will stop feeding FFT data.
+ * When switching to LIVE_AUDIO mode, audio task will resume feeding FFT data.
+ */
+void waterfall_set_mode(waterfall_mode_t mode) {
+    g_waterfallMode = mode;
+}
+
+/**
+ * Check if audio task should feed FFT data to waterfall
+ * Called by audio processing pipeline before calling waterfall_accm_add_fft()
+ * @return 1 if audio should feed waterfall, 0 otherwise
+ */
+int waterfall_should_feed_fft(void) {
+    return (g_waterfallMode == WATERFALL_MODE_LIVE_AUDIO) ? 1 : 0;
+}
 
 /**
  * Token function for the "micDebug" command
@@ -198,6 +233,88 @@ static uint8_t fnGainWaterfall(char *rest, void *v) {
 }
 
 /**
+ * Token function for the "waterfallBandwidth" command
+ * Gets or sets the maximum frequency to display in the waterfall
+ * 
+ * Formats: 'waterfallBandwidth' (get), 'waterfallBandwidth 600' (set to 600 Hz)
+ * Valid range: 1 Hz to 24000 Hz (Nyquist for 48 kHz audio)
+ * 
+ * @param rest Remainder of the command string (bandwidth in Hz or empty)
+ * @param v Void pointer for context (unused)
+ * @return 0 on success, non-zero on failure
+ */
+static uint8_t fnWaterfallBandwidth(char *rest, void *v) {
+    (void)v;
+    
+    // Skip whitespace
+    while (*rest && isspace(*rest)) {
+        rest++;
+    }
+    
+    // If no arguments, return current value
+    if (*rest == '\0') {
+        printf("Current waterfall bandwidth: %lu Hz\n", getWaterfallBandwidth());
+        return 0;
+    }
+    
+    // Parse the bandwidth value
+    uint32_t bandwidth_hz;
+    if (sscanf(rest, "%lu", &bandwidth_hz) != 1) {
+        printf("Error: waterfallBandwidth requires a numeric value (Hz)\n");
+        return 1;
+    }
+    
+    // Validate range
+    if (bandwidth_hz < 1 || bandwidth_hz > 24000) {
+        printf("Error: bandwidth must be between 1 Hz and 24000 Hz (Nyquist)\n");
+        return 1;
+    }
+    
+    // Set the bandwidth
+    setWaterfallBandwidth(bandwidth_hz);
+    printf("Waterfall bandwidth set to %lu Hz\n", bandwidth_hz);
+    return 0;
+}
+
+/**
+ * Token function for the "debugFFT" command
+ * Enables/disables FFT debug output (logs bin values and power levels)
+ * 
+ * Formats: 'debugFFT' (get), 'debugFFT 0' (disable), 'debugFFT 1' (enable)
+ * 
+ * @param rest Remainder of the command string (0/1 or empty)
+ * @param v Void pointer for context (unused)
+ * @return 0 on success, non-zero on failure
+ */
+static uint8_t fnDebugFFT(char *rest, void *v) {
+    (void)v;
+    
+    // Skip whitespace
+    while (*rest && isspace(*rest)) {
+        rest++;
+    }
+    
+    // If no arguments, return current value
+    if (*rest == '\0') {
+        int enabled = getFFTDebug();
+        printf("FFT debug: %s\n", enabled ? "ENABLED" : "DISABLED");
+        return 0;
+    }
+    
+    // Parse the enable value
+    int enable_value;
+    if (sscanf(rest, "%d", &enable_value) != 1) {
+        printf("Error: debugFFT requires 0 (disable) or 1 (enable)\n");
+        return 1;
+    }
+    
+    // Set the debug flag
+    setFFTDebug(enable_value);
+    printf("FFT debug: %s\n", enable_value ? "ENABLED" : "DISABLED");
+    return 0;
+}
+
+/**
  * Token function for the "colorWaterfall" command
  * Gets or sets the waterfall colormap by index
  * Available: 0=Jet (default), 1=Parula
@@ -219,21 +336,236 @@ static uint8_t fnColorWaterfall(char *rest, void *v) {
     
     // If no arguments, return current colormap index
     if (*rest == '\0') {
-        uint32_t index = waterfall_get_colormap();
+        uint16_t index = getColorMap();
         const char *names[] = {"Jet", "Parula"};
-        printf("Current colormap: %s (index %lu)\n", names[index], index);
+        printf("Current colormap: %s (index %u)\n", names[index], index);
         return 0;
     }
     
     // Parse the colormap index
     uint32_t colormap_index;
     if (sscanf(rest, "%lu", &colormap_index) != 1) {
-        printf("Error: colormapWaterfall requires a numeric index\n");
+        printf("Error: colorWaterfall requires a numeric index\n");
         return 1;
     }
     
-    // Set the colormap (setter validates and defaults to 0 if invalid)
-    waterfall_set_colormap(colormap_index);
+    // Set the colormap (setter wraps modulo to valid range)
+    setColorMap((uint16_t)colormap_index);
+    return 0;
+}
+
+/**
+ * Token function for the "drawBar" command
+ * Draws a test bar on the waterfall display with the specified color level
+ * Scrolls display left by 1 pixel and writes new colored column
+ * 
+ * Formats: 'drawBar 0' (draw blue), 'drawBar 7' (draw yellow), 'drawBar 15' (draw pale yellow)
+ * Valid range: 0-15 (0=low/cool colors, 15=high/warm colors)
+ */
+static uint8_t fnDrawBar(char *rest, void *v) {
+    (void)v;
+    
+    // Switch to TEST mode to prevent audio FFT interference
+    waterfall_set_mode(WATERFALL_MODE_TEST);
+    
+    // Skip whitespace
+    while (*rest && isspace(*rest)) {
+        rest++;
+    }
+    
+    // drawBar requires a color level argument
+    if (*rest == '\0') {
+        printf("Error: drawBar requires a color level (0-15)\n");
+        printf("  0 = blue (lowest), 7 = yellow (mid), 15 = pale yellow (highest)\n");
+        return 1;
+    }
+    
+    // Parse the amplitude level (0-15)
+    uint32_t amplitude_level;
+    if (sscanf(rest, "%lu", &amplitude_level) != 1) {
+        printf("Error: drawBar requires a numeric color level (0-15)\n");
+        return 1;
+    }
+    
+    // Bounds check: clamp to valid range (function also does this, but validate here for feedback)
+    if (amplitude_level > 15) {
+        printf("Warning: Color level %lu out of range, clamping to 15\n", amplitude_level);
+        amplitude_level = 15;
+    }
+    
+    // Draw the test bar on the waterfall display
+    waterfall_draw_bar((uint8_t)amplitude_level);
+    printf("Drew waterfall test bar with color level %lu\n", amplitude_level);
+    
+    return 0;
+}
+
+/**
+ * Token function for the "testWaterfallColors" command
+ * Displays all 16 colors from current colormap as vertical bars
+ * Fills entire screen with gradient from color 0-15
+ * Useful for verifying colormap and display hardware
+ * 
+ * @param rest Remainder of the command string (unused)
+ * @param v Void pointer for context (unused)
+ * @return 0 on success
+ */
+static uint8_t fnTestWaterfallColors(char *rest, void *v) {
+    (void)rest;
+    (void)v;
+    
+    // Switch to TEST mode to prevent audio FFT interference
+    waterfall_set_mode(WATERFALL_MODE_TEST);
+    
+    printf("Testing waterfall colormap - displaying all 16 colors\n");
+    
+    /* Initialize waterfall display in portrait mode */
+    waterfall_mode_init();
+    
+    /* Create test colormap index array - all indices from 0-15 repeated */
+    uint16_t testIndices[24] = {
+        0, 1, 2, 3, 4, 5, 6, 7,
+        8, 9, 10, 11, 12, 13, 14, 15,
+        1, 2, 3, 4, 5, 6, 7, 8
+    };
+    
+    /* Draw the colormap test bars (2 full cycles across screen) */
+    for (uint16_t bar_idx = 0; bar_idx < 32; bar_idx++) {
+        waterfall_draw_bar(bar_idx % 16);  /* Cycle through all 16 colors */
+        sleep_ms(50);  /* Brief pause between bars */
+    }
+    
+    printf("Color test complete. Press 'testWaterfallScroll' to test animation.\n");
+    return 0;
+}
+
+/**
+ * Token function for the "drawColorBars" command
+ * Displays individual color bars: white, blue, green, red
+ * Each color occupies 8 vertical bars across the full display width
+ * Useful for verifying color accuracy of the display
+ * 
+ * @param rest Remainder of the command string (unused)
+ * @param v Void pointer for context (unused)
+ * @return 0 on success
+ */
+static uint8_t fnDrawColorBars(char *rest, void *v) {
+    (void)rest;
+    (void)v;
+    
+    // Switch to TEST mode to prevent audio FFT interference
+    waterfall_set_mode(WATERFALL_MODE_TEST);
+    
+    printf("Drawing individual color bars: white | blue | green | red\n");
+    
+    /* Initialize waterfall display in portrait mode */
+    waterfall_mode_init();
+    
+    /* Draw the four basic color bars */
+    drawColorBars();
+    
+    printf("Color bars drawn: 8 white | 8 blue | 8 green | 8 red\n");
+    return 0;
+}
+
+/**
+ * Token function for the "testWaterfallScroll" command
+ * Tests waterfall animation by continuously scrolling colored bars
+ * Press Ctrl+C or send another command to stop
+ * Alternates between Jet and Parula colormaps every 32 bars
+ * 
+ * @param rest Remainder of the command string (unused)
+ * @param v Void pointer for context (unused)
+ * @return 0 on success (runs indefinitely)
+ */
+static uint8_t fnTestWaterfallScroll(char *rest, void *v) {
+    (void)rest;
+    (void)v;
+    
+    // Switch to TEST mode to prevent audio FFT interference
+    waterfall_set_mode(WATERFALL_MODE_TEST);
+    
+    printf("Testing waterfall scroll animation - Ctrl+C to stop\n");
+    printf("Alternating between Jet (0) and Parula (1) colormaps every 32 bars\n");
+    
+    /* Initialize waterfall display in portrait mode */
+    waterfall_mode_init();
+    
+    /* Run scrolling animation indefinitely */
+    while (1) {
+        /* Jet colormap: 32 bars with cycling colors */
+        setColorMap(0);
+        printf("Jet colormap - scrolling...\n");
+        for (uint16_t cnt = 0; cnt < 32; cnt++) {
+            /* Cycle through colormap (0-15) */
+            waterfall_draw_bar(cnt % 16);
+            sleep_ms(50);  /* 50ms per bar ≈ 20 bars/second */
+        }
+        
+        /* Parula colormap: 32 bars with cycling colors */
+        setColorMap(1);
+        printf("Parula colormap - scrolling...\n");
+        for (uint16_t cnt = 0; cnt < 32; cnt++) {
+            /* Cycle through colormap (0-15) */
+            waterfall_draw_bar(cnt % 16);
+            sleep_ms(50);
+        }
+    }
+    
+    return 0;
+}
+
+/**
+ * Token function for the "fillColor" command
+ * Fills the entire waterfall screen with a single color from the colormap
+ * Useful for testing individual colormap indices (0-15)
+ * 
+ * @param rest Remainder of the command string (color index 0-15)
+ * @param v Void pointer for context (unused)
+ * @return 0 on success, non-zero on failure
+ */
+static uint8_t fnFillColor(char *rest, void *v) {
+    (void)v;
+    
+    // Switch to TEST mode to prevent audio FFT interference
+    waterfall_set_mode(WATERFALL_MODE_TEST);
+    
+    // Skip whitespace
+    while (*rest && isspace(*rest)) {
+        rest++;
+    }
+    
+    // fillColor requires a color index argument
+    if (*rest == '\0') {
+        printf("Error: fillColor requires a colormap index (0-15)\n");
+        printf("  Usage: fillColor <index>\n");
+        printf("  Example: fillColor 7 (middle of colormap)\n");
+        return 1;
+    }
+    
+    // Parse the color index (0-15)
+    uint32_t color_index;
+    if (sscanf(rest, "%lu", &color_index) != 1) {
+        printf("Error: fillColor requires a numeric colormap index (0-15)\n");
+        return 1;
+    }
+    
+    // Bounds check
+    if (color_index > 15) {
+        printf("Warning: Color index %lu out of range, clamping to 15\n", color_index);
+        color_index = 15;
+    }
+    
+    // Initialize waterfall display
+    waterfall_mode_init();
+    
+    // Fill entire screen (32 bars × 10 pixels wide = 320 pixels total width)
+    printf("Filling screen with color index %lu...\n", color_index);
+    for (uint16_t bar_count = 0; bar_count < 32; bar_count++) {
+        waterfall_draw_bar((uint8_t)color_index);
+    }
+    
+    printf("Screen filled with color index %lu\n", color_index);
     return 0;
 }
 
@@ -513,9 +845,29 @@ static uint8_t fnUdpStop(char *rest, void *v) {
     return 0;
 }
 
+/* ============== Waterfall Accumulator (Global for Audio Task Access) ============== */
+/**
+ * Global waterfall accumulator - used by audio processing task when in LIVE_AUDIO mode
+ * Maintained here to coordinate between parser and audio pipeline
+ */
+static waterfall_accm_t g_waterfallAccumulator;
+
+/**
+ * Get pointer to global waterfall accumulator (for audio task)
+ * Called by audio processing pipeline to feed FFT data
+ * @return Pointer to waterfall accumulator (or NULL if not in LIVE_AUDIO mode)
+ */
+void* waterfall_get_accumulator(void) {
+    if (waterfall_get_mode() == WATERFALL_MODE_LIVE_AUDIO) {
+        return (void*)&g_waterfallAccumulator;
+    }
+    return NULL;  // Not in LIVE_AUDIO mode
+}
+
 /**
  * Token function for the "enableWaterfall" command
- * Starts the waterfall display server (similar to udpStart)
+ * Switches to LIVE_AUDIO mode and initializes the accumulator
+ * The audio processing task will begin feeding FFT data to the waterfall
  * 
  * @param rest Remainder of the command string (unused)
  * @param v Void pointer for context (unused)
@@ -525,26 +877,32 @@ static uint8_t fnEnableWaterfall(char *rest, void *v) {
     (void)rest;
     (void)v;
     
-    if (xSemaphoreTake(g_LvglMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        int result = waterfall_server_start();
-        xSemaphoreGive(g_LvglMutex);
-        
-        if (result == 0) {
-            printf("Waterfall display enabled\n");
-            return 0;
-        } else {
-            printf("Failed to enable waterfall display\n");
-            return 1;
-        }
-    } else {
-        printf("Failed to acquire LVGL mutex\n");
+    if (xSemaphoreTake(g_LvglMutex, pdMS_TO_TICKS(500)) != pdTRUE) {
+        printf("Failed to acquire display mutex\n");
         return 1;
     }
+    
+    printf("Enabling waterfall display - initializing for live audio...\n");
+    
+    /* Initialize display hardware */
+    waterfall_mode_init();
+    
+    /* Initialize accumulator for FFT data */
+    waterfall_accm_init(&g_waterfallAccumulator);
+    
+    /* Switch to LIVE_AUDIO mode - audio task will now feed FFT data */
+    waterfall_set_mode(WATERFALL_MODE_LIVE_AUDIO);
+    
+    printf("Waterfall display enabled and ready for live audio (100 FFT frames per bar)\n");
+    printf("NOTE: Audio processing task must be calling waterfall_accm_add_fft() for bars to appear\n");
+    
+    xSemaphoreGive(g_LvglMutex);
+    return 0;
 }
 
 /**
  * Token function for the "disableWaterfall" command
- * Stops the waterfall display server (similar to udpStop)
+ * Switches to OFF mode, stopping the audio task from feeding FFT data
  * 
  * @param rest Remainder of the command string (unused)
  * @param v Void pointer for context (unused)
@@ -554,15 +912,73 @@ static uint8_t fnDisableWaterfall(char *rest, void *v) {
     (void)rest;
     (void)v;
     
-    if (xSemaphoreTake(g_LvglMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        waterfall_server_stop();
-        printf("Waterfall display disabled\n");
-        xSemaphoreGive(g_LvglMutex);
-        return 0;
-    } else {
-        printf("Failed to acquire LVGL mutex\n");
+    if (xSemaphoreTake(g_LvglMutex, pdMS_TO_TICKS(500)) != pdTRUE) {
+        printf("Failed to acquire display mutex\n");
         return 1;
     }
+    
+    printf("Disabling waterfall display - audio task will stop feeding FFT data\n");
+    waterfall_set_mode(WATERFALL_MODE_OFF);
+    
+    xSemaphoreGive(g_LvglMutex);
+    return 0;
+}
+
+/**
+ * Token function for the "waterfallMode" command
+ * Gets or sets the waterfall display mode
+ * 
+ * Usage:
+ *  waterfallMode       - Get current mode
+ *  waterfallMode 0     - OFF mode (no FFT feeding, no test mode)
+ *  waterfallMode 1     - TEST mode (exclusive display access for test functions)
+ *  waterfallMode 2     - LIVE_AUDIO mode (audio task feeds FFT data)
+ * 
+ * @param rest Remainder of the command string
+ * @param v Void pointer for context (unused)
+ * @return 0 on success, non-zero on failure
+ */
+static uint8_t fnWaterfallMode(char *rest, void *v) {
+    (void)v;
+    
+    while (*rest && isspace(*rest)) {
+        rest++;
+    }
+    
+    // If no arguments, return current mode
+    if (*rest == '\0') {
+        const char *modeNames[] = {"OFF", "TEST", "LIVE_AUDIO"};
+        waterfall_mode_t mode = waterfall_get_mode();
+        printf("Current waterfall mode: %s (%d)\n", modeNames[mode], mode);
+        printf("  0=OFF (disabled),  1=TEST (test functions),  2=LIVE_AUDIO (audio FFT)\n");
+        return 0;
+    }
+    
+    // Parse the mode value
+    uint32_t mode_value;
+    if (sscanf(rest, "%lu", &mode_value) != 1) {
+        printf("Error: waterfallMode requires 0 (OFF), 1 (TEST), or 2 (LIVE_AUDIO)\n");
+        return 1;
+    }
+    
+    if (mode_value > 2) {
+        printf("Error: Invalid mode %lu. Valid modes: 0=OFF, 1=TEST, 2=LIVE_AUDIO\n", mode_value);
+        return 1;
+    }
+    
+    if (xSemaphoreTake(g_LvglMutex, pdMS_TO_TICKS(500)) != pdTRUE) {
+        printf("Failed to acquire display mutex\n");
+        return 1;
+    }
+    
+    waterfall_mode_t new_mode = (waterfall_mode_t)mode_value;
+    waterfall_set_mode(new_mode);
+    
+    const char *modeNames[] = {"OFF", "TEST", "LIVE_AUDIO"};
+    printf("Waterfall mode set to: %s\n", modeNames[new_mode]);
+    
+    xSemaphoreGive(g_LvglMutex);
+    return 0;
 }
 
 /**
@@ -586,8 +1002,16 @@ static const struct s_tokens aTokens[] = {
     {"udpStop",       "Stop UDP server",                      fnUdpStop},
     {"enableWaterfall","Enable waterfall display",           fnEnableWaterfall},
     {"disableWaterfall","Disable waterfall display",         fnDisableWaterfall},
+    {"waterfallMode", "Get/set waterfall mode (0=OFF, 1=TEST, 2=LIVE_AUDIO)", fnWaterfallMode},
     {"gainWaterfall", "Get/set waterfall gain (1-N)",        fnGainWaterfall},
+    {"waterfallBandwidth", "Get/set max frequency (Hz)",     fnWaterfallBandwidth},
+    {"debugFFT",       "Get/set FFT debug output (0=off, 1=on)", fnDebugFFT},
     {"colorWaterfall", "Get/set waterfall colormap (0=Jet, 1=Parula)", fnColorWaterfall},
+    {"drawBar",       "Draw test bar (0-15 color level)",    fnDrawBar},
+    {"fillColor",     "Fill screen with color (0-15 index)", fnFillColor},
+    {"testWaterfallColors", "Test colormap display (all colors)", fnTestWaterfallColors},
+    {"drawColorBars", "Draw RGB color bars (white|blue|green|red)", fnDrawColorBars},
+    {"testWaterfallScroll", "Test scroll animation (infinite)", fnTestWaterfallScroll},
     {NULL,            NULL,                                    NULL}
 };
 

@@ -36,6 +36,10 @@ void st7789_flush(lv_display_t *display, const lv_area_t *area, uint8_t *px_map)
  */
 int st7789_init_hw(void);
 
+// Initialize the display for waterfall mode (portrait orientation with vertical scroll)
+// This is the base mode for operation.
+int st7789_lcd_init(void);
+
 /**
  * Set display to portrait mode (240×320)
  * Used for waterfall spectrogram display with vertical scroll
@@ -92,3 +96,11 @@ int st7789_init_waterfall(void);
  * @param fft_data 16-element FFT magnitude array (0-65535 range)
  */
 void st7789_waterfall_update(const uint16_t *fft_data);
+
+/**
+ * Write a horizontal bar (240×8 pixels) and shift display up
+ * For waterfall display: scrolls content up by 8 pixels, writes new bar at bottom edge
+ * 
+ * @param data Pointer to bar data (240 × 8 = 1920 pixels = 3840 bytes)
+ */
+void st7789_write_bar(const uint16_t *data, uint32_t dataSize);

@@ -2,6 +2,8 @@
 #include <lvgl.h>
 #include "FreeRTOS.h"
 #include "semphr.h"
+#include "task.h"
+#include <pico/multicore.h>
 #include "widgets.h"
 
 /* External display pointer */
@@ -142,4 +144,40 @@ void set_clock_needle_value(int32_t value) {
         lv_scale_set_line_needle_value(scale_line, needle_line, 60, value);
     }
 
+}
+
+/**
+ * LVGL Timer Update Task
+ * 
+ * Periodically calls lv_timer_handler() to process LVGL timers.
+ * Runs on Core 1 (isolated from audio processing on Core 0).
+ * Prevents lv_timer_handler() from returning 0xFFFFFFFF when no timers are scheduled.
+ * 
+ * @param parameters Task parameters (unused)
+ */
+void timer_update_task(void *parameters)
+{
+    (void)parameters;  /* Suppress unused parameter warning */
+    
+    printf("Timer update task started on Core %d\n", get_core_num());
+    fflush(stdout);
+    
+    /* Main task loop: periodically update LVGL timers */
+    while (1) {
+        /* Process LVGL timers */
+        uint32_t delay_ms = lv_timer_handler();
+        
+        /* If no timers ready (0xFFFFFFFF), use a safe default delay */
+        if (delay_ms == 0xFFFFFFFF) {
+            delay_ms = 10;
+        }
+        
+        /* Ensure minimum delay to prevent busy-loop */
+        if (delay_ms == 0) {
+            delay_ms = 1;
+        }
+        
+        /* Sleep for the recommended delay */
+        vTaskDelay(pdMS_TO_TICKS(delay_ms));
+    }
 }

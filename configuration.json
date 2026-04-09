@@ -1,0 +1,63 @@
+{
+  "project": {
+    "name": "VibeCode4",
+    "description": "Real-time spectrogram audio visualization on Raspberry Pi Pico with ST7789 LCD display",
+    "version": "1.0.0"
+  },
+
+  "display": {
+    "controller": "ST7789",
+    "screen_width": 320,
+    "screen_height": 240,
+    "orientation": "portrait",
+    "pins": {
+      "DIN": 0,
+      "CLK": 1,
+      "CS": 2,
+      "DC": 3,
+      "RESET": 4,
+      "BL": 5
+    },
+    "serial_clock_divider": 1.0
+  },
+
+  "audio_filter": {
+    "sample_rate_hz": 48000,
+    "lowpass_hz": 10000,
+    "highpass_hz": 50,
+    "decimation_factor": 64,
+    "decimation_max": 128,
+    "sinc_order": 3,
+    "max_volume": 16,
+    "gain": 1
+  },
+
+  "spectrogram": {
+    "fft_size": 256,
+    "fft_sample_rate_hz": 6000,
+    "downsample_factor": 8,
+    "num_display_bins": 16,
+    "bins_skip": 5,
+    "magnitude_max": 2000.0,
+    "gain_normalization": 10
+  },
+
+  "waterfall": {
+    "max_frequency_hz": 3000,
+    "accumulation_frames": 9,
+    "pixels_per_bar": 24,
+    "bins_per_bar": 5,
+    "fft_bins_available": 128,
+    "fft_bins_used": 120
+  },
+
+  "_computed": {
+    "description": "Values derived from configuration above - for reference and documentation",
+    "waterfall_frequency_resolution_hz_per_bin": 46.875,
+    "waterfall_frequency_resolution_hz_per_pixel": 234.375,
+    "audio_filter_decimation_ratio": 64,
+    "fft_sample_rate_derivation": "48000 Hz / 8 = 6000 Hz",
+    "waterfall_bins_used_derivation": "24 pixels × 5 bins/pixel = 120 bins",
+    "waterfall_unused_bins": "128 - 120 = 8 bins (2880-3000 Hz, high freq noise)"
+  }
+}

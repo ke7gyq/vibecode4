@@ -10,20 +10,10 @@
 #include "hardware/gpio.h"
 #include "hardware/dma.h"
 
+
 #include "st7789_lcd.pio.h"
 #include "st7789.h"
 #include "waterfall.h"
-
-/* Pin definitions for ST7789 LCD interface */
-#define PIN_DIN 0       /* Data In (PIO TX) */
-#define PIN_CLK 1       /* Clock */
-#define PIN_CS 2        /* Chip Select */
-#define PIN_DC 3        /* Data/Command */
-#define PIN_RESET 4     /* Reset */
-#define PIN_BL 5        /* Backlight */
-#define SERIAL_CLK_DIV 1.f  /* PIO clock divider */
-
-
 
 
 // Format: cmd length (including cmd byte), post delay in units of 5 ms, then cmd payload
@@ -83,22 +73,22 @@ static uint sm = 0;
 static int dma_chan = -1;
 
 
-
 void start_pixels() {
   st7789_start_pixels ( pio, sm );
 }
 
+void lcd_put ( uint16_t v ) {
+  st7789_lcd_put(pio,sm,v>>8);
+  st7789_lcd_put(pio,sm,v&0xff);
+}
 
 void lcd_write_pixels ( const uint16_t *data, size_t count ) {
-    st7789_lcd_wait_idle(pio, sm);
-    lcd_set_dc_cs(1, 0);
-    for (size_t i = 0; i < count; ++i){
-        uint16_t v = data[i];
-        st7789_lcd_put(pio,sm,v>>8);
-        st7789_lcd_put(pio,sm,v&0xff);
-    }   
-    st7789_lcd_wait_idle(pio, sm);
-    lcd_set_dc_cs(1, 1);
+  st7789_lcd_wait_idle(pio, sm);
+  lcd_set_dc_cs(1, 0);
+  for (size_t i = 0; i < count; ++i)
+    lcd_put(*data++);
+  st7789_lcd_wait_idle(pio, sm);
+  lcd_set_dc_cs(1, 1);
 }
 
 void lcd_write_pixels_dma(const uint16_t *data, size_t count) {
@@ -107,26 +97,25 @@ void lcd_write_pixels_dma(const uint16_t *data, size_t count) {
         lcd_write_pixels(data, count);
         return;
     }
-    
     st7789_lcd_wait_idle(pio, sm);
     lcd_set_dc_cs(1, 0);
-    
+
     // DMA directly from the data pointer without intermediate buffer
     dma_channel_abort(dma_chan);
-    
+
     dma_channel_config c = dma_channel_get_default_config(dma_chan);
     channel_config_set_read_increment(&c, true);
     channel_config_set_write_increment(&c, false);
     channel_config_set_transfer_data_size(&c, DMA_SIZE_8);
     channel_config_set_dreq(&c, pio_get_dreq(pio, sm, true));
-    
+
     dma_channel_set_config(dma_chan, &c, false);
     dma_channel_set_read_addr(dma_chan, (uint8_t *)data, false);
     dma_channel_set_write_addr(dma_chan, (uint8_t *)&pio->txf[sm], false);
     dma_channel_set_trans_count(dma_chan, count * 2, true);
-    
+
     dma_channel_wait_for_finish_blocking(dma_chan);
-    
+
     st7789_lcd_wait_idle(pio, sm);
     lcd_set_dc_cs(1, 1);
 }
@@ -148,6 +137,41 @@ void setDrawArea(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1) {
     cmd_buf[4] = y1p & 0xff;
     lcd_write_cmd(pio, sm, cmd_buf, sizeof(cmd_buf));
 }
+
+// Note that TFA + VSA +BFA  must be 320 for the vertical scroll to work properly
+// MADCTL MV bit must be set for vertical scrolling to work, and the scroll area is 
+// effectively rotated by 90 degrees, so the scroll area is defined in terms of 
+// the horizontal dimensions of the display.
+
+//  Use 0,0 for the full screen, or set the top and bottom margins to have a fixed area that doesn't scroll.
+
+void st7789_setScrollMargins( uint16_t top, uint16_t bottom ) {
+    uint16_t middle=320 - top - bottom;
+    uint8_t cmd_buf[7];
+    cmd_buf[0] = 0x33; // VSCRDEF
+    cmd_buf[1] = top >> 8;
+    cmd_buf[2] = top & 0xff;
+    cmd_buf[3] = middle >> 8;
+    cmd_buf[4] = middle & 0xff;
+    cmd_buf[5] = bottom >> 8;
+    cmd_buf[6] = bottom & 0xff;
+    lcd_write_cmd(pio, sm, cmd_buf, sizeof(cmd_buf));
+}
+
+void st7789_scrollAddress ( uint16_t vsp ) {
+    uint8_t cmd_buf[3];
+    cmd_buf[0] = 0x37; // VCSAD
+    cmd_buf[1] = vsp >> 8;
+    cmd_buf[2] = vsp & 0xff;
+    lcd_write_cmd(pio, sm, cmd_buf, sizeof(cmd_buf));
+}
+
+void st7789_setVerticalMode ( void ) {
+    uint8_t cmd_buf[2];
+    cmd_buf[0] = 0x36; // MADCTL
+    cmd_buf[1] = 0xA0; // Vertical mode
+    lcd_write_cmd(pio, sm, cmd_buf, sizeof(cmd_buf));
+}   
 
 
 #define SERIAL_CLK_DIV 1.f
@@ -182,48 +206,4 @@ void drawRegion ( uint16_t x0, uint16_t y0, uint16_t width, uint16_t height, con
     setDrawArea(x0, y0, width, height);
     start_pixels();
     lcd_write_pixels_dma(data, width * height);
-}
-
-/**
- * Set vertical scroll margins for ST7789 hardware scrolling
- * @param top Fixed lines at top (non-scrolling)
- * @param bottom Fixed lines at bottom (non-scrolling)
- * Scrolling area = total height (320 for RP2350 portrait) - top - bottom
- */
-void st7789_setScrollMargins(uint16_t top, uint16_t bottom) {
-    uint16_t middle = 320 - top - bottom;
-    uint8_t cmd_buf[7];
-    cmd_buf[0] = 0x33;  // VSCRDEF - Vertical Scroll Definition
-    cmd_buf[1] = top >> 8;
-    cmd_buf[2] = top & 0xff;
-    cmd_buf[3] = middle >> 8;
-    cmd_buf[4] = middle & 0xff;
-    cmd_buf[5] = bottom >> 8;
-    cmd_buf[6] = bottom & 0xff;
-    lcd_write_cmd(pio, sm, cmd_buf, sizeof(cmd_buf));
-}
-
-/**
- * Set vertical scroll position using hardware scroll
- * @param vsp Vertical scroll position (0-319 for 320-pixel-tall display)
- * Efficient hardware-based scrolling without copying frame buffer
- */
-void st7789_scrollAddress(uint16_t vsp) {
-    uint8_t cmd_buf[3];
-    cmd_buf[0] = 0x37;  // VCSAD - Vertical Scroll Start Address
-    cmd_buf[1] = vsp >> 8;
-    cmd_buf[2] = vsp & 0xff;
-    lcd_write_cmd(pio, sm, cmd_buf, sizeof(cmd_buf));
-}
-
-/**
- * Configure ST7789 for vertical (portrait) mode with scroll enabled
- * Switches from default landscape to portrait orientation
- * Enables hardware vertical scroll functionality
- */
-void st7789_setVerticalMode(void) {
-    uint8_t cmd_buf[2];
-    cmd_buf[0] = 0x36;  // MADCTL - Memory Data Access Control
-    cmd_buf[1] = 0xA0;  // Portrait mode with vertical scroll
-    lcd_write_cmd(pio, sm, cmd_buf, sizeof(cmd_buf));
 }

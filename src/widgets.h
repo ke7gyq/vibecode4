@@ -29,4 +29,12 @@ void clear_screen(void);
  */
 void set_clock_needle_value(int32_t value);
 
+/**
+ * LVGL Timer Update Task
+ * Periodically calls lv_timer_handler() to process LVGL timers.
+ * Runs on Core 1 (isolated from audio processing on Core 0).
+ * @param parameters Task parameters (unused)
+ */
+void timer_update_task(void *parameters);
+
 #endif // WIDGETS_H

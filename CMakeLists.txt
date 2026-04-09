@@ -55,9 +55,13 @@ enable_language(ASM)
 # Initialize pico SDK
 pico_sdk_init()
 
-# OPTIMIZATION: Disable optimizations for reliable race condition handling
-# At -O2, compiler reordering defeats memory barriers. -O0 with memory barriers is stable.
-add_compile_options(-O0 -g)
+# OPTIMIZATION: Per-file optimization flags
+# Apply -O0 to FreeRTOS synchronization files (queues, semaphores, volatile state)
+# Apply -O3 to DSP/FFT/filtering routines (critical performance path)
+# Memory barriers refactored to use FreeRTOS queues (no explicit __atomic_thread_fence)
+
+# Default to -Og (optimize for debugging)
+add_compile_options(-Og -g)
 
 # Include FreeRTOS Kernel for RP2350
 include(${FREERTOS_KERNEL_PATH}/portable/ThirdParty/Community-Supported-Ports/GCC/RP2350_ARM_NTZ/FreeRTOS_Kernel_import.cmake)
@@ -69,28 +73,41 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -I${CMSIS_6_PATH}/CMSIS/Core/Include")
 add_subdirectory(${CMSIS_DSP_PATH} ${CMAKE_BINARY_DIR}/CMSIS-DSP)
 
 # =====================================================================
-# Generate LUT_Params.h from microphone_config.h
+# Generate configuration headers from configuration.json
 # =====================================================================
-set(MICROPHONE_CONFIG_H "${CMAKE_CURRENT_SOURCE_DIR}/src/microphone_config.h")
+set(CONFIGURATION_JSON "${CMAKE_CURRENT_SOURCE_DIR}/configuration.json")
+set(CONFIG_CONSTANTS_H "${CMAKE_CURRENT_BINARY_DIR}/generated/config_constants.h")
 set(LUT_PARAMS_H "${CMAKE_CURRENT_BINARY_DIR}/generated/LUT_Params.h")
 
 # Ensure generated directory exists
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated")
 
-# Add custom command to generate LUT_Params.h
+# Generate config_constants.h from configuration.json
+add_custom_command(
+    OUTPUT "${CONFIG_CONSTANTS_H}"
+    COMMAND ${CMAKE_COMMAND} -E echo "Generating config_constants.h from configuration.json..."
+    COMMAND python3 "${CMAKE_CURRENT_SOURCE_DIR}/scripts/generate_headers.py"
+            "${CONFIGURATION_JSON}"
+            "${CONFIG_CONSTANTS_H}"
+    DEPENDS "${CONFIGURATION_JSON}" "${CMAKE_CURRENT_SOURCE_DIR}/scripts/generate_headers.py"
+    COMMENT "Generating system configuration constants"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
+)
+
+# Generate LUT_Params.h from configuration.json
 add_custom_command(
     OUTPUT "${LUT_PARAMS_H}"
-    COMMAND ${CMAKE_COMMAND} -E echo "Generating LUT_Params.h..."
+    COMMAND ${CMAKE_COMMAND} -E echo "Generating LUT_Params.h from configuration.json..."
     COMMAND python3 "${CMAKE_CURRENT_SOURCE_DIR}/utils/generate_lut.py"
-            "${MICROPHONE_CONFIG_H}"
+            "${CONFIGURATION_JSON}"
             "${LUT_PARAMS_H}"
-    DEPENDS "${MICROPHONE_CONFIG_H}" "${CMAKE_CURRENT_SOURCE_DIR}/utils/generate_lut.py"
+    DEPENDS "${CONFIGURATION_JSON}" "${CMAKE_CURRENT_SOURCE_DIR}/utils/generate_lut.py"
     COMMENT "Generating OpenPDM2PCM LUT lookup table"
     WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
 )
 
-# Add custom target to track LUT generation
-add_custom_target(generate_lut ALL DEPENDS "${LUT_PARAMS_H}")
+# Add custom targets to track header generation
+add_custom_target(generate_config_headers ALL DEPENDS "${CONFIG_CONSTANTS_H}" "${LUT_PARAMS_H}")
 
 # Source files
 set(SOURCES
@@ -112,8 +129,8 @@ set(SOURCES
 # Create executable for vibecode4
 add_executable(vibecode4 ${SOURCES})
 
-# Make vibecode4 depend on LUT generation
-add_dependencies(vibecode4 generate_lut)
+# Make vibecode4 depend on header generation from configuration.json
+add_dependencies(vibecode4 generate_config_headers)
 
 # Include directories for main executable
 target_include_directories(vibecode4 PRIVATE
@@ -127,6 +144,34 @@ target_include_directories(vibecode4 PRIVATE
     ${PICO_SDK_PATH}/src/rp2_common/hardware_dma/include
 )
 
+# =====================================================================
+# Per-file optimization flags
+# =====================================================================
+# Files with FreeRTOS synchronization (queues, semaphores) use -O0
+# to preserve volatile semantics and queue operations correctly
+# Note: Explicit memory barriers (__atomic_thread_fence) removed
+# in favor of FreeRTOS queue-based synchronization
+set_source_files_properties(
+    src/microphone.c
+    src/fault_handler.c
+    PROPERTIES
+    COMPILE_FLAGS "-O0"
+)
+
+# spectrogram.c: FFT and waterfall processing - enable aggressive optimization
+set_source_files_properties(
+    src/spectrogram.c
+    PROPERTIES
+    COMPILE_FLAGS "-O3 -g"
+)
+
+# FFT and audio DSP routines - enable aggressive optimization
+set_source_files_properties(
+    src/audio_dsp_example.c
+    src/OpenPDMFilter.c
+    PROPERTIES
+    COMPILE_FLAGS "-O3"
+)
 
 
 # LVGL library (stage 1: core LVGL)

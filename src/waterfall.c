@@ -1,912 +1,331 @@
 /**
- * Waterfall Display Implementation
+ * Waterfall Display - Optimized Hardware Scrolling Version
  * 
- * LVGL Canvas-based real-time frequency waterfall display
- * Uses Matlab Parula colormap (256-level) downsampled to 16 discrete colors
- * 
- * Includes a FreeRTOS task for real-time spectrogram processing and display update
+ * Ultra-fast waterfall spectrogram using ST7789 hardware scroll
+ * No LVGL, no accumulators - processes FFT bins directly to display
  */
 
 #include <stdio.h>
-#include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
-#include <lvgl.h>
+
+#include "st7789.h"
+#include "waterfall.h"
+#include "spectrogram.h"
+#include "microphone.h"
 #include "FreeRTOS.h"
 #include "task.h"
 #include "semphr.h"
 #include "pico/time.h"
-#include "waterfall.h"
-#include "microphone.h"
 
-/* Debug flag - 0=OFF, 1+=ON */
-extern uint8_t g_micDebug;
+#define COLORMAP_SIZE 16
 
-/* Forward declare the queue from microphone */
-extern QueueHandle_t g_audioQueueWaterfall;
-
-/* ============== Parula Colormap (16-level discrete version) ============== */
-
-/**
- * RGB color structure for colormaps
- * Values will be converted by LVGL to the correct format
- */
-typedef struct {
-    uint8_t r, g, b;
-} Colormap;
-
-/**
- * Matplotlib Jet colormap sampled at 16 discrete levels (blue to red)
- * Index 0 = blue (lowest), Index 15 = red (highest)
- */
-static const Colormap jet_colormap_16[] = {
-    {0,     0,   139},   /* 0:  Deep Blue */
-    {0,     0,   255},   /* 1:  Blue */
-    {0,   100,   255},   /* 2:  Light Blue */
-    {0,   200,   255},   /* 3:  Cyan */
-    {0,   255,   200},   /* 4:  Cyan-Green */
-    {100, 255,   100},   /* 5:  Green */
-    {155, 255,   0},     /* 6:  Yellow-Green */
-    {200, 200,   0},     /* 7:  Yellow */
-    {255, 200,   0},     /* 8:  Yellow-Orange */
-    {255, 150,   0},     /* 9:  Orange */
-    {255, 100,   0},     /* 10: Orange-Red */
-    {255, 50,    0},     /* 11: Red-Orange */
-    {255, 0,     0},     /* 12: Red */
-    {200, 0,     0},     /* 13: Dark Red */
-    {150, 0,     0},     /* 14: Darker Red */
-    {100, 0,     50},    /* 15: Deep Red */
+/* Jet colormap: RGB565 format, blue to red spectrum */
+static const uint16_t RGB_jet_colormap_16[COLORMAP_SIZE] = {
+    0x0004, 0x0006, 0x00C7, 0x04D7, 0x0AB7, 0x0EFF, 
+    0x1FDF, 0x1FDD, 0x1FDB, 0x1FD9, 0xFD80, 0x9200, 
+    0x4D00, 0x0800, 0x0000, 0xF800
 };
 
-/**
- * Matlab Parula colormap sampled at 16 discrete levels
- * RGB values that will be converted by LVGL to the correct format
- */
-static const Colormap parula_colormap_16[] = {
-    {31,   69,  139},   /* 0:  Deep Blue */
-    {0,    143, 150},   /* 1:  Teal */
-    {0,    166, 147},   /* 2:  Cyan */
-    {47,   167, 111},   /* 3:  Cyan-Green */
-    {94,   159, 79},    /* 4:  Green-Cyan */
-    {140,  154, 48},    /* 5:  Yellow-Green */
-    {176,  158, 29},    /* 6:  Yellow-Green 2 */
-    {201,  163, 26},    /* 7:  Yellow */
-    {220,  174, 29},    /* 8:  Yellow-Orange */
-    {235,  189, 42},    /* 9:  Orange */
-    {244,  206, 58},    /* 10: Orange-Yellow */
-    {245,  223, 76},    /* 11: Light Orange */
-    {242,  240, 97},    /* 12: Yellow */
-    {246,  246, 120},   /* 13: Bright Yellow */
-    {255,  255, 142},   /* 14: Pale Yellow */
-    {255,  255, 164},   /* 15: Very Pale Yellow */
+/* Parula colormap: RGB565 format */
+static const uint16_t parula_colormap_16[COLORMAP_SIZE] = {
+    0x400A, 0x484B, 0x48CC, 0x494C, 0x400C, 0x3BEB, 
+    0x3049, 0x2288, 0x1EC6, 0x1206, 0x27E8, 0x420B, 
+    0x728C, 0x41E8, 0x77C5, 0x7BE4
 };
 
-/* ============== Log Magnitude to Amplitude Level Lookup Table ============== */
-/**
- * Lookup table for converting summed magnitude-squared values to amplitude levels 0-15
- * This table maps the log scale to perceptually uniform amplitude levels
- * The thresholds are empirically tuned for good visualization
- * 
- * Each entry represents the power threshold for that amplitude level
- * magnitude_sq >= power_threshold[level] produces that level
- */
-static const uint32_t power_threshold_log_lut[16] = {
-    1,           /* Level 0: threshold = 1 (log ≈ 0) */
-    2,           /* Level 1: threshold = 2 (log ≈ 0.3) */
-    5,           /* Level 2: threshold = 5 (log ≈ 0.7) */
-    10,          /* Level 3: threshold = 10 (log ≈ 1.0) */
-    20,          /* Level 4: threshold = 20 (log ≈ 1.3) */
-    50,          /* Level 5: threshold = 50 (log ≈ 1.7) */
-    100,         /* Level 6: threshold = 100 (log ≈ 2.0) */
-    200,         /* Level 7: threshold = 200 (log ≈ 2.3) */
-    500,         /* Level 8: threshold = 500 (log ≈ 2.7) */
-    1000,        /* Level 9: threshold = 1000 (log ≈ 3.0) */
-    2000,        /* Level 10: threshold = 2000 (log ≈ 3.3) */
-    5000,        /* Level 11: threshold = 5000 (log ≈ 3.7) */
-    10000,       /* Level 12: threshold = 10000 (log ≈ 4.0) */
-    20000,       /* Level 13: threshold = 20000 (log ≈ 4.3) */
-    50000,       /* Level 14: threshold = 50000 (log ≈ 4.7) */
-    100000,      /* Level 15: threshold = 100000 (log ≈ 5.0) */
+/* Colormap array and active colormap pointer */
+static const uint16_t * const aColorPointers[] = {
+    RGB_jet_colormap_16,
+    parula_colormap_16
 };
 
-/* ============== Static Variables ============== */
+static const uint16_t *g_colorPointer = RGB_jet_colormap_16;
+static uint16_t g_colormapIndex = 0;
 
-/* Current waterfall canvas object */
-static lv_obj_t *g_waterfall_canvas = NULL;
+/* Pixel buffer: 24 frequency bins × 10 pixels wide × 10 pixels tall */
+pixel_buffer_t pixBuf;
 
-/* Canvas pixel buffer (managed by LVGL) */
-static uint8_t *g_canvas_buffer = NULL;
-
-/* Current column position (0 to WATERFALL_WIDTH-1) */
-static uint16_t g_current_column = 0;
-
-/* FreeRTOS task handle for waterfall processor */
-/* Waterfall task handle - NULL until waterfall_init creates the task */
-/* Made non-static so it can be checked by microphone.c to determine if waterfall is active */
-TaskHandle_t g_waterfall_task_handle = NULL;
-
-/* Waterfall task shutdown flag - set by waterfall_server_stop() to signal task to exit */
-/* Task checks this and calls vTaskDelete(NULL) to safely shutdown */
-static volatile int g_waterfall_server_shutdown = 0;
-
-/* Pointer to spectrogram context (set by main.c via waterfall_set_spectrogram) */
-static spectrogram_t *g_spectrogram_ctx = NULL;
-
-/* External semaphore for audio ready notifications */
-extern SemaphoreHandle_t g_audioReadySemaphore;
-
-/* External LVGL mutex */
-extern SemaphoreHandle_t g_LvglMutex;
-
-/* ============== Waterfall Configuration & Statistics ============== */
-
-/* Spectrum accumulation: sum 100 frames' FFT magnitudes for averaging */
-#define WATERFALL_ACCUMULATION_COUNT 100
-
-/* Accumulator buffer: uint64_t to avoid overflow when summing 100 q15_t values */
-static uint64_t g_waterfall_magnitude_accum[WATERFALL_FREQ_BANDS] = {0};
-
-/* Frame counter for accumulation (0-99, resets after averaging) */
-static uint32_t g_waterfall_accum_frame_count = 0;
-
-/* Statistics tracking */
-static uint32_t g_waterfall_frames_accumulated = 0;  /* Total frames processed */
-static uint32_t g_waterfall_spectra_displayed = 0;   /* Total averaged spectra sent to display */
-static uint32_t g_waterfall_frames_dropped = 0;      /* Frames lost due to queue overflow */
-
-/* Waterfall gain control */
-static uint32_t g_gainWaterfall = 10;  /* Default: 10 */
-static uint32_t g_gainWaterfallSquaredScaled = 100;  /* Scaled by 10000: (10*10) = 100 */
-
-/* Colormap selection */
-static const Colormap *g_colormap16 = jet_colormap_16;  /* Pointer to active colormap (default: Jet) */
-static uint32_t g_colormapIndex = 0;  /* 0 = Jet, 1 = Parula */
-
-/* Array of available colormaps */
-static const Colormap * const g_colormaps[] = {
-    jet_colormap_16,
-    parula_colormap_16,
-};
-#define NUM_COLORMAPS 2
-
-/* ============== Implementation ============== */
+typedef uint16_t pixelColors_t[PIXELS_PER_BAR];
 
 /**
- * FreeRTOS task for waterfall display update
- * Receives audio buffer messages from queue, processes through spectrogram,
- * and updates the waterfall display in real-time
- * 
- * Implements smart frame dropping and queue flushing to prevent backup
+ * Set active colormap by index
+ * @param selectedColormapIndex 0=Jet, 1=Parula, or modulo of available colormaps
  */
-static void waterfall_task(void *pvParameters)
-{
-    (void)pvParameters;
-    
-    printf("Waterfall task started\n");
-    
-    static uint32_t frame_count = 0;
-    static uint32_t last_sequence = 0;
-    static uint32_t last_depth_report = 0;
-    static uint32_t peak_queue_depth = 0;
-    AudioBufferMessage_t msg;
-    
-    /* Task main loop */
-    while (1) {
-        /* Check for shutdown signal */
-        if (g_waterfall_server_shutdown) {
-            printf("Waterfall task: Shutdown signal received, exiting...\n");
-            g_waterfall_task_handle = NULL;
-            vTaskDelete(NULL);  /* Task deletes itself safely */
-            return; /* Unreachable, but for clarity */
-        }
-        
-        /* Monitor queue depth */
-        UBaseType_t queue_depth = uxQueueMessagesWaiting(g_audioQueueWaterfall);
-        if (queue_depth > peak_queue_depth) {
-            peak_queue_depth = queue_depth;
-        }
-        
-        /* Smart queue flushing: if queue backed up, drain it to get latest message */
-        if (queue_depth >= 4) {
-            /* Queue is full - drain old messages, keep only the newest */
-            AudioBufferMessage_t temp_msg;
-            uint32_t drained = 0;
-            
-            /* Drain all but one message from queue */
-            while (uxQueueMessagesWaiting(g_audioQueueWaterfall) > 1) {
-                if (xQueueReceive(g_audioQueueWaterfall, &temp_msg, pdMS_TO_TICKS(0)) == pdTRUE) {
-                    msg = temp_msg;  /* Keep the last one we read */
-                    drained++;
-                }
-            }
-            
-            g_waterfall_frames_dropped += drained - 1;  /* Count dropped frames via module-level global */
-            
-            if (drained > 0 && g_micDebug >= 1) {
-                printf("[Waterfall] Queue FLUSHED: drained %lu messages, kept newest seq=%lu\n",
-                       drained, msg.sequence);
-            }
-        } else if (xQueueReceive(g_audioQueueWaterfall, &msg, pdMS_TO_TICKS(1000)) != pdTRUE) {
-            /* No message available - timeout */
-            if (g_micDebug >= 1) {
-                printf("[Waterfall] Queue timeout (no audio for 1 second)\n");
-            }
-            continue;
-        }
-        
-        /* Periodic reporting */
-        uint32_t current_time = to_ms_since_boot(get_absolute_time());
-        if (current_time - last_depth_report >= 5000) {  /* Report every 5 seconds */
-            last_depth_report = current_time;
-            if (g_micDebug >= 1) {
-                printf("[Waterfall] Stats: frames_accumulated=%lu, spectra_displayed=%lu, frames_dropped=%lu, peak_queue_depth=%u/4\n",
-                       g_waterfall_frames_accumulated, g_waterfall_spectra_displayed, g_waterfall_frames_dropped, peak_queue_depth);
-            }
-            peak_queue_depth = 0;  /* Reset peak after reporting */
-        }
-        
-        /* Check for missed buffers (sequence gap) */
-        if (last_sequence > 0 && msg.sequence != last_sequence + 1) {
-            if (g_micDebug >= 1) {
-                printf("[Waterfall] Frame %lu: MISSED %lu buffers (seq %lu → %lu)\n",
-                       frame_count, msg.sequence - last_sequence - 1, last_sequence, msg.sequence);
-            }
-        }
-        last_sequence = msg.sequence;
-        
-        if (g_micDebug >= 7) {
-            printf("[Waterfall] Frame %lu: Processing seq=%lu buf=%u (%u samples)\n",
-                   frame_count, msg.sequence, msg.buffer_id, msg.sample_count);
-        }
-        
-        /* If spectrogram context is configured */
-        if (g_spectrogram_ctx != NULL) {
-            lv_obj_t *canvas = waterfall_get_canvas();
-            if (canvas != NULL) {
-                /* === Load audio data into spectrogram input buffer === */
-                if (g_micDebug >= 7) {
-                    printf("[Waterfall] Frame %lu: Loading %u samples into spectrogram\n",
-                           frame_count, msg.sample_count);
-                }
-                
-                /* Feed audio data to spectrogram processor */
-                spectrogram_update_input_buffer(g_spectrogram_ctx, 
-                                               msg.buffer_ptr, 
-                                               msg.sample_count);
-                
-                /* Compute FFT from buffered audio (but not bins yet) */
-                int fft_result = spectrogram_compute_fft(g_spectrogram_ctx);
-                
-                if (g_micDebug >= 7) {
-                    printf("[Waterfall] Frame %lu: FFT result=%d\n", frame_count, fft_result);
-                }
-                
-                if (fft_result == 0) {
-                    /* === Accumulate magnitude-squared spectrum === */
-                    /* For each frequency band, sum the magnitude-squared of constituent FFT bins */
-                    for (uint32_t bin = 0; bin < WATERFALL_FREQ_BANDS; bin++) {
-                        /* Bounds check: ensure bin is within accumulator array */
-                        if (bin >= WATERFALL_FREQ_BANDS) {
-                            printf("[Waterfall] ERROR: Bin %lu exceeds WATERFALL_FREQ_BANDS (%d)\n", bin, WATERFALL_FREQ_BANDS);
-                            continue;
-                        }
-                        
-                        /* Calculate range of FFT bins for this frequency band (same as spectrogram_compute_bins) */
-                        uint32_t bin_start = bin * SPECTROGRAM_BIN_SIZE + SPECTROGRAM_BINS_SKIP;
-                        uint32_t bin_end = bin_start + SPECTROGRAM_BIN_SIZE;
-                        
-                        /* Clamp to valid FFT magnitude range */
-                        if (bin_start >= SPECTROGRAM_FFT_SIZE / 2) {
-                            continue;
-                        }
-                        if (bin_end > SPECTROGRAM_FFT_SIZE / 2) {
-                            bin_end = SPECTROGRAM_FFT_SIZE / 2;
-                        }
-                        
-                        /* Sum magnitude-squared across all FFT bins in this display band */
-                        for (uint32_t i = bin_start; i < bin_end; i++) {
-                            /* Extra safety: bounds check FFT magnitude array */
-                            if (i >= SPECTROGRAM_FFT_SIZE / 2) {
-                                printf("[Waterfall] ERROR: FFT index %lu exceeds max %lu\n", i, SPECTROGRAM_FFT_SIZE / 2);
-                                break;
-                            }
-                            int32_t mag = (int32_t)g_spectrogram_ctx->fft_magnitude[i];
-                            g_waterfall_magnitude_accum[bin] += (uint64_t)(mag * mag);
-                        }
-                    }
-                    
-                    g_waterfall_accum_frame_count++;
-                    g_waterfall_frames_accumulated++;
-                    
-                    if (g_micDebug >= 2) {
-                        printf("[Waterfall] Frame %lu: Accumulated frame %u/100\n",
-                               frame_count, g_waterfall_accum_frame_count);
-                    }
-                    
-                    /* === Check if we have 100 frames accumulated === */
-                    if (g_waterfall_accum_frame_count >= WATERFALL_ACCUMULATION_COUNT) {
-                        /* Create waterfall bar from accumulated magnitudes */
-                        t_waterfallBar bar;
-                        memset(&bar, 0, sizeof(bar));
-                        
-                        /* Pass accumulated magnitude_sq with gain applied (let log function handle scaling) */
-                        for (uint8_t i = 0; i < WATERFALL_FREQ_BANDS; i++) {
-                            /* Bounds check: ensure index is within bar structure */
-                            if (i >= WATERFALL_FREQ_BANDS) {
-                                printf("[Waterfall] ERROR: Bar index %u exceeds WATERFALL_FREQ_BANDS (%d)\n", i, WATERFALL_FREQ_BANDS);
-                                break;
-                            }
-                            if (i >= WATERFALL_FREQ_BANDS) {
-                                printf("[Waterfall] ERROR: Accumulator index %u exceeds array bounds\n", i);
-                                break;
-                            }
-                            
-                            /* Apply gain using integer arithmetic: gained = accum[i] * (gain*gain) / 10000 */
-                            uint64_t gained = ((uint64_t)g_waterfall_magnitude_accum[i] * g_gainWaterfallSquaredScaled) / 10000;
-                            
-                            /* Clamp to uint32_t range for display */
-                            bar.magnitude_sq[i] = (gained > 0xFFFFFFFFUL) ? 0xFFFFFFFFUL : (uint32_t)gained;
-                            
-                            if (g_micDebug >= 7) {
-                                printf("[Waterfall] Band %u: accum=%llu gained=%.2f display=%u\n",
-                                       i, g_waterfall_magnitude_accum[i], gained, bar.magnitude_sq[i]);
-                            }
-                        }
-                        
-                        /* Update waterfall display with mutex protection */
-                        if (xSemaphoreTake(g_LvglMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-                            waterfall_add_column(canvas, &bar);
-                            xSemaphoreGive(g_LvglMutex);
-                            g_waterfall_spectra_displayed++;
-                            
-                            if (g_micDebug >= 1) {
-                                printf("[Waterfall] Spectrum %lu: Displayed averaged spectrum (100 frames)\n", g_waterfall_spectra_displayed);
-                            }
-                        } else if (g_micDebug >= 1) {
-                            printf("[Waterfall] Frame %lu: LVGL mutex timeout\n", frame_count);
-                        }
-                        
-                        /* Reset accumulator for next batch */
-                        memset(g_waterfall_magnitude_accum, 0, sizeof(g_waterfall_magnitude_accum));
-                        g_waterfall_accum_frame_count = 0;
-                    }
-                } else {
-                    if (g_micDebug >= 1) {
-                        printf("[Waterfall] Frame %lu: FFT/Bins computation failed\n", frame_count);
-                    }
-                }
-                
-                frame_count++;
-            }
-        }
-    }
+void setColorMap(uint16_t selectedColormapIndex) {
+    uint16_t num_colormaps = sizeof(aColorPointers) / sizeof(aColorPointers[0]);
+    uint16_t idx = selectedColormapIndex % num_colormaps;
+    g_colorPointer = aColorPointers[idx];
+    g_colormapIndex = idx;
 }
 
 /**
- * Initialize the waterfall display canvas
- * Creates a new LVGL canvas widget that fills the entire display
- * Also spawns the waterfall processing task
+ * Get current colormap index
  */
-lv_obj_t * waterfall_init(void)
-{
-    /* Destroy any existing waterfall */
-    if (g_waterfall_canvas != NULL) {
-        waterfall_destroy(g_waterfall_canvas);
-    }
-    
-    /* Get the active screen */
-    lv_obj_t *screen = lv_screen_active();
-    if (screen == NULL) {
-        printf("ERROR: No active screen for waterfall display\n");
-        return NULL;
-    }
-    
-    /* Clear the screen first */
-    lv_obj_clean(screen);
-    
-    /* Create canvas widget - fills entire display */
-    lv_obj_t *canvas = lv_canvas_create(screen);
-    if (canvas == NULL) {
-        printf("ERROR: Failed to create LVGL canvas\n");
-        return NULL;
-    }
-    
-    /* Set canvas size to fill entire display */
-    lv_obj_set_size(canvas, WATERFALL_WIDTH, WATERFALL_HEIGHT);
-    lv_obj_align(canvas, LV_ALIGN_CENTER, 0, 0);
-    
-    /* Allocate canvas buffer */
-    /* For RGB565 (2 bytes per pixel): WATERFALL_WIDTH * WATERFALL_HEIGHT * 2 bytes */
-    uint32_t buffer_size = WATERFALL_WIDTH * WATERFALL_HEIGHT * (LV_COLOR_DEPTH / 8);
-    
-    g_canvas_buffer = (uint8_t *)malloc(buffer_size);
-    if (g_canvas_buffer == NULL) {
-        printf("ERROR: Failed to allocate canvas buffer (%u bytes)\n", buffer_size);
-        lv_obj_del(canvas);
-        return NULL;
-    }
-    
-    /* Initialize buffer to black (clear) */
-    memset(g_canvas_buffer, 0, buffer_size);
-    
-    /* Set canvas buffer */
-    lv_canvas_set_buffer(canvas, g_canvas_buffer, WATERFALL_WIDTH, WATERFALL_HEIGHT, LV_COLOR_FORMAT_RGB565);
-    
-    /* Store reference and reset column counter */
-    g_waterfall_canvas = canvas;
-    g_current_column = 0;
-    
-    printf("Waterfall display initialized (%u x %u pixels)\n", WATERFALL_WIDTH, WATERFALL_HEIGHT);
-    printf("Canvas buffer allocated: %u bytes\n", buffer_size);
-    
-    /* Create waterfall processing task if not already created */
-    if (g_waterfall_task_handle == NULL) {
-        /* Pin waterfall task to Core 0 (moved from Core 1 to join UDP audio processing) */
-        /* This allows TimerTask (Core 1) to do SPI display I/O without interfering */
-        const UBaseType_t core_0_affinity = (1 << 0);  /* Core 0 only */
-        
-        BaseType_t result = xTaskCreateAffinitySet(
-            waterfall_task,                    /* Task function */
-            "waterfall",                       /* Task name */
-            2048,                              /* Stack size in words */
-            NULL,                              /* Task parameter */
-            tskIDLE_PRIORITY + 2,              /* Priority */
-            core_0_affinity,                   /* Core affinity: Core 0 (with UDP audio) */
-            &g_waterfall_task_handle           /* Task handle */
-        );
-        
-        if (result != pdPASS) {
-            printf("ERROR: Failed to create waterfall task\n");
-            waterfall_destroy(canvas);
-            return NULL;
-        }
-        printf("Waterfall task created on Core 0\n");
-    }
-    
-    return canvas;
-}
-
-/**
- * Helper function: Convert magnitude-squared to amplitude level (0-15)
- * Uses logarithmic lookup table for perceptually uniform levels
- * Includes bounds checking to prevent invalid indexing
- * 
- * @param magnitude_sq Raw magnitude-squared value from FFT
- * @return Amplitude level 0-15 (guaranteed valid)
- */
-static uint8_t magnitude_sq_to_amplitude_level(uint32_t magnitude_sq)
-{
-    /* Find the appropriate level by comparing against thresholds */
-    for (uint8_t level = 15; level > 0; level--) {
-        /* Bounds check: ensure level is within LUT array (should always be true in this loop) */
-        if (level >= 16) {
-            printf("[Waterfall] ERROR: Level %u exceeds LUT bounds\n", level);
-            continue;
-        }
-        
-        if (magnitude_sq >= power_threshold_log_lut[level]) {
-            return level;
-        }
-    }
-    return 0;  /* Below lowest threshold */
-}
-
-/**
- * Convert amplitude level to magnitude_sq value
- * Used by parser for manual control - maps color_index to corresponding magnitude_sq
- * The mapping follows the log thresholds: color n requires magnitude_sq >= threshold[n]
- * Includes bounds checking to prevent invalid LUT access
- */
-uint32_t waterfall_color_index_to_magnitude_sq(uint8_t color_index)
-{
-    /* Bounds check: ensure index is within LUT array (0-15) */
-    if (color_index >= 16) {
-        printf("[Waterfall] ERROR: color_index %u exceeds valid range (0-15), clamping\n", color_index);
-        color_index = 15;
-    }
-    
-    if (color_index == 0) {
-        return 0;  /* Level 0: magnitude_sq < threshold[0] */
-    } else if (color_index < 16) {
-        /* Return the threshold value for this color level */
-        /* Extra safety check before indexing */
-        if (color_index >= 16) {
-            printf("[Waterfall] ERROR: color_index %u out of bounds after check\n", color_index);
-            return power_threshold_log_lut[15];
-        }
-        return power_threshold_log_lut[color_index];
-    } else {
-        /* Clamp to maximum color level */
-        return power_threshold_log_lut[15];
-    }
-}
-
-/**
- * Add a waterfall bar to the display
- * Shifts existing display left by WATERFALL_X_GRANULARITY pixels and draws new data on the right
- * Processes all 16 frequency bins, applies log scaling, and maps to colors
- */
-void waterfall_add_column(lv_obj_t *canvas, const t_waterfallBar *bar)
-{
-    if (canvas == NULL || g_canvas_buffer == NULL) {
-        printf("ERROR: Waterfall not initialized\n");
-        return;
-    }
-    
-    if (bar == NULL) {
-        printf("ERROR: Invalid waterfall bar pointer\n");
-        return;
-    }
-    
-    /* Calculate pixel position and size */
-    uint16_t bytes_per_pixel = LV_COLOR_DEPTH / 8;
-    uint16_t row_stride = WATERFALL_WIDTH * bytes_per_pixel;
-    uint16_t col_start = WATERFALL_WIDTH - WATERFALL_X_GRANULARITY;  /* Starting column for new data */
-    
-    /* First, shift entire canvas left by WATERFALL_X_GRANULARITY pixels */
-    for (uint16_t row = 0; row < WATERFALL_HEIGHT; row++) {
-        uint8_t *row_ptr = &g_canvas_buffer[row * row_stride];
-        
-        /* Shift left by WATERFALL_X_GRANULARITY pixels */
-        for (uint16_t col = 0; col < WATERFALL_WIDTH - WATERFALL_X_GRANULARITY; col++) {
-            uint32_t from = (col + WATERFALL_X_GRANULARITY) * bytes_per_pixel;
-            uint32_t to = col * bytes_per_pixel;
-            
-            for (uint16_t b = 0; b < bytes_per_pixel; b++) {
-                row_ptr[to + b] = row_ptr[from + b];
-            }
-        }
-    }
-    
-    /* Clear the rightmost WATERFALL_X_GRANULARITY columns to black */
-    for (uint16_t row = 0; row < WATERFALL_HEIGHT; row++) {
-        for (uint16_t col = col_start; col < WATERFALL_WIDTH; col++) {
-            uint32_t offset = row * row_stride + col * bytes_per_pixel;
-            uint8_t *pixel = &g_canvas_buffer[offset];
-            pixel[0] = 0x00;  /* Black (RGB565) */
-            pixel[1] = 0x00;
-        }
-    }
-    
-    /* Process each of the 16 frequency bins */
-    for (uint8_t freq_bin = 0; freq_bin < WATERFALL_FREQ_BANDS; freq_bin++) {
-        /* Bounds check: ensure freq_bin is valid */
-        if (freq_bin >= WATERFALL_FREQ_BANDS) {
-            printf("[Waterfall] ERROR: freq_bin %u exceeds WATERFALL_FREQ_BANDS (%d)\n", freq_bin, WATERFALL_FREQ_BANDS);
-            break;
-        }
-        
-        /* Convert magnitude-squared to amplitude level using log lookup table */
-        uint8_t amplitude_level = magnitude_sq_to_amplitude_level(bar->magnitude_sq[freq_bin]);
-        
-        /* Bounds check: ensure amplitude_level is valid for colormap (0-15) */
-        if (amplitude_level >= 16) {
-            printf("[Waterfall] ERROR: amplitude_level %u exceeds colormap range (0-15)\n", amplitude_level);
-            amplitude_level = 15;  /* Clamp to maximum */
-        }
-        
-        /* Get RGB color for this amplitude level and convert using LVGL */
-        Colormap rgb = g_colormap16[amplitude_level];
-        lv_color_t color = lv_color_make(rgb.r, rgb.g, rgb.b);
-        
-        /* Calculate which rows correspond to this frequency band */
-        uint16_t row_start = freq_bin * WATERFALL_BAR_HEIGHT;
-        uint16_t row_end = row_start + WATERFALL_BAR_HEIGHT;
-        
-        /* Bounds check: ensure row_end doesn't exceed canvas height */
-        if (row_end > WATERFALL_HEIGHT) {
-            printf("[Waterfall] ERROR: row_end %u exceeds WATERFALL_HEIGHT (%u)\n", row_end, WATERFALL_HEIGHT);
-            row_end = WATERFALL_HEIGHT;  /* Clamp to canvas bounds */
-        }
-        
-        /* Draw this frequency band across all WATERFALL_X_GRANULARITY columns */
-        for (uint16_t row = row_start; row < row_end; row++) {
-            /* Extra safety: bounds check row coordinate */
-            if (row >= WATERFALL_HEIGHT) {
-                printf("[Waterfall] ERROR: row %u exceeds WATERFALL_HEIGHT (%u), stopping draw\n", row, WATERFALL_HEIGHT);
-                break;
-            }
-            
-            for (uint16_t col = col_start; col < WATERFALL_WIDTH; col++) {
-                /* Extra safety: bounds check col coordinate */
-                if (col >= WATERFALL_WIDTH) {
-                    printf("[Waterfall] ERROR: col %u exceeds WATERFALL_WIDTH (%u)\n", col, WATERFALL_WIDTH);
-                    break;
-                }
-                
-                /* Use LVGL's lv_canvas_set_px with full opacity */
-                lv_canvas_set_px(canvas, col, row, color, LV_OPA_COVER);
-            }
-        }
-    }
-    
-    /* Invalidate canvas to trigger redraw */
-    lv_obj_invalidate(canvas);
-    
-    g_current_column++;
-}
-
-/**
- * Destroy the waterfall canvas and free resources
- * Stops the waterfall task and frees allocated memory
- */
-void waterfall_destroy(lv_obj_t *canvas)
-{
-    if (canvas == NULL) {
-        return;
-    }
-    
-    /* NOTE: Do NOT delete the waterfall task here. */
-    /* The task self-deletes via shutdown flag in waterfall_server_stop(). */
-    /* Attempting to delete from another task is unsafe and causes FreeRTOS corruption. */
-    
-    /* Free canvas buffer */
-    if (g_canvas_buffer != NULL) {
-        free(g_canvas_buffer);
-        g_canvas_buffer = NULL;
-    }
-    
-    /* Delete canvas object */
-    lv_obj_del(canvas);
-    
-    g_waterfall_canvas = NULL;
-    g_current_column = 0;
-    
-    printf("Waterfall display destroyed\n");
-}
-
-/**
- * Get the current waterfall canvas
- */
-lv_obj_t * waterfall_get_canvas(void)
-{
-    return g_waterfall_canvas;
-}
-
-/**
- * Clear the waterfall display while maintaining the canvas
- */
-void waterfall_clear(lv_obj_t *canvas)
-{
-    if (canvas == NULL || g_canvas_buffer == NULL) {
-        printf("ERROR: Waterfall not initialized\n");
-        return;
-    }
-    
-    /* Clear buffer to black (0x0000) */
-    uint32_t buffer_size = WATERFALL_WIDTH * WATERFALL_HEIGHT * (LV_COLOR_DEPTH / 8);
-    memset(g_canvas_buffer, 0x00, buffer_size);
-    
-    /* Invalidate to trigger redraw */
-    lv_obj_invalidate(canvas);
-    
-    printf("Waterfall display cleared\n");
-}
-
-/**
- * Get accumulation progress for current batch
- * Returns how many frames have been accumulated toward the next display update
- * 
- * @return Number of frames accumulated (0-99), or 100 when batch complete
- */
-uint32_t waterfall_get_accumulation_progress(void)
-{
-    return g_waterfall_accum_frame_count;
-}
-
-/**
- * Set frame skip rate (deprecated - kept for compatibility)
- * In accumulation mode, this function does nothing
- * Frame rate is fixed at 1 display update per 100 audio frames
- * 
- * @param skip_rate Ignored
- */
-void waterfall_set_frame_skip_rate(uint8_t skip_rate)
-{
-    (void)skip_rate;  /* Parameter ignored in accumulation mode */
-    
-    printf("[Waterfall] Frame skip rate setter deprecated - system uses spectrum accumulation\n");
-    printf("[Waterfall] Mode: Accumulate 100 frames (~1 Hz display)\n");
-}
-
-/**
- * Get the current frame skip rate (deprecated)
- * In accumulation mode, always returns WATERFALL_ACCUMULATION_COUNT (100)
- * 
- * @return WATERFALL_ACCUMULATION_COUNT (100 frames per display update)
- */
-uint8_t waterfall_get_frame_skip_rate(void)
-{
-    /* In accumulation mode, return the accumulation count clamped to uint8_t */
-    return (WATERFALL_ACCUMULATION_COUNT > 255) ? 255 : (uint8_t)WATERFALL_ACCUMULATION_COUNT;
-}
-
-/**
- * Set the spectrogram context for the waterfall task to use
- * Called by main.c to attach the spectrogram processor
- * 
- * @param spec pointer to initialized spectrogram_t context
- */
-void waterfall_set_spectrogram(spectrogram_t *spec)
-{
-    g_spectrogram_ctx = spec;
-    if (spec != NULL) {
-        printf("Waterfall spectrogram context configured\n");
-    } else {
-        printf("Waterfall spectrogram context cleared\n");
-    }
-}
-
-/**
- * Get the current waterfall queue depth
- * Used for diagnostics and performance monitoring
- * 
- * @return Number of messages currently in waterfall audio queue (0-4)
- */
-UBaseType_t waterfall_get_queue_depth(void)
-{
-    if (g_audioQueueWaterfall == NULL) {
-        return 0;
-    }
-    return uxQueueMessagesWaiting(g_audioQueueWaterfall);
-}
-
-/**
- * Set the waterfall spectrum gain
- * Gain is a percentage value (1-1000+)
- * Internally computed as gainSquared = (gain/100)^2 for efficient spectrum scaling
- * 
- * @param gain New gain value (1 or higher)
- */
-void waterfall_set_gain(uint32_t gain)
-{
-    if (gain == 0) {
-        printf("Error: Gain must be >= 1\n");
-        return;
-    }
-    
-    g_gainWaterfall = gain;
-    g_gainWaterfallSquaredScaled = gain * gain;  /* Store as integer: (gain/100)^2 * 10000 = gain^2 */
-    printf("Waterfall gain set to %lu\n", g_gainWaterfall);
-}
-
-/**
- * Get the current waterfall spectrum gain
- * 
- * @return Current gain value
- */
-uint32_t waterfall_get_gain(void)
-{
-    return g_gainWaterfall;
-}
-
-/**
- * Get the squared gain value used internally for spectrum scaling
- * Returns the scaled gain multiplier (scaled by 10000)
- * 
- * @return Scaled gain squared value
- */
-uint32_t waterfall_get_gain_squared(void)
-{
-    return g_gainWaterfallSquaredScaled;
-}
-
-/**
- * Set the waterfall colormap by index
- * If index is invalid, defaults to Jet (index 0)
- * 
- * @param index Colormap index (0 = Jet, 1 = Parula)
- */
-void waterfall_set_colormap(uint32_t index)
-{
-    if (index >= NUM_COLORMAPS) {
-        printf("Invalid colormap index %lu, using default (Jet)\n", index);
-        g_colormapIndex = 0;
-        g_colormap16 = g_colormaps[0];
-    } else {
-        g_colormapIndex = index;
-        g_colormap16 = g_colormaps[index];
-        const char *names[] = {"Jet", "Parula"};
-        printf("Colormap changed to %s (index %lu)\n", names[index], index);
-    }
-}
-
-/**
- * Get the current waterfall colormap index
- * 
- * @return Current colormap index
- */
-uint32_t waterfall_get_colormap(void)
-{
+uint16_t getColorMap(void) {
     return g_colormapIndex;
 }
 
-/* ==================== Waterfall Server Interface (similar to UDP server) ==================== */
-
-/* Waterfall server state */
-static int g_waterfall_server_running = 0;
-
 /**
- * Start the waterfall display server
- * Initializes the display canvas and processing task
- * Called from parser on "enableWaterfall" command
- * 
- * @return 0 on success, -1 on failure
+ * Map frequency colormap indices to pixel buffer
+ * Expands 24 frequency bins into 10×10 pixel blocks
+ * @param freqData Array of 24 RGB565 color values
  */
-int waterfall_server_start(void)
-{
-    if (g_waterfall_server_running) {
-        printf("Waterfall Server: Already running\n");
-        return -1;
+static void pxArrayToPixBuf(const pixelColors_t freqData) {
+    uint16_t color, xPos, yPos, colorIdx;
+    for (colorIdx = 0; colorIdx < PIXELS_PER_BAR; colorIdx++) {
+        color = freqData[colorIdx];
+        for (xPos = 0; xPos < PIXEL_WIDTH; xPos++) {
+            for (yPos = 0; yPos < PIXEL_HEIGHT; yPos++) {
+                pixBuf.pixels[colorIdx][yPos][xPos] = color;
+            }
+        }
     }
-    
-    printf("Waterfall Server: Starting...\n");
-    
-    /* Reset shutdown flag to allow new task to run */
-    g_waterfall_server_shutdown = 0;
-    
-    /* Initialize the waterfall display and create processing task */
-    lv_obj_t *canvas = waterfall_init();
-    if (canvas == NULL) {
-        printf("Waterfall Server: ERROR - Failed to initialize display\n");
-        return -1;
-    }
-    
-    g_waterfall_server_running = 1;
-    printf("Waterfall Server: Started successfully\n");
-    return 0;
 }
 
 /**
- * Stop the waterfall display server
- * Signals the task to shutdown gracefully (task deletes itself)
- * Called from parser on "disableWaterfall" command
- * 
- * IMPORTANT: Does NOT directly call vTaskDelete (unsafe from another task).
- * Instead signals the waterfall_task to self-destruct via g_waterfall_server_shutdown flag.
+ * Convert colormap indices to RGB565 colors and fill pixel buffer
+ * @param colormapIndexArray Array of 24 colormap indices (0-15)
+ * @param noOfEntries Number of valid entries (should be PIXELS_PER_BAR=24)
  */
-void waterfall_server_stop(void)
-{
-    if (!g_waterfall_server_running) {
-        return;
-    }
-    
-    printf("Waterfall Server: Stopping...\n");
-    
-    /* Signal the task to shutdown gracefully */
-    g_waterfall_server_shutdown = 1;
-    
-    /* Wait briefly for task to self-delete */
-    /* Give it 100ms to exit cleanly */
-    for (int i = 0; i < 10; i++) {
-        if (g_waterfall_task_handle == NULL) {
-            printf("Waterfall task self-destructed cleanly\n");
-            break;
+void fillPixelsToBar(const uint16_t *colormapIndexArray, uint16_t noOfEntries) {
+    pixelColors_t freqData;
+
+    for (uint16_t idx = 0; idx < PIXELS_PER_BAR; idx++) {
+        if (idx >= noOfEntries) {
+            freqData[idx] = 0;  // Black for unused entries
+        } else {
+            uint16_t idx2 = colormapIndexArray[idx];
+            // Clamp to valid colormap range, 0 (black) if out of bounds
+            uint16_t color = (idx2 < COLORMAP_SIZE) ? g_colorPointer[idx2] : 0;
+            freqData[idx] = color;
         }
-        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    pxArrayToPixBuf(freqData);
+}
+
+/* =====================================================================
+ * Global color bar definitions for display testing
+ * =====================================================================
+ */
+
+/* RGB565 color values */
+#define COLOR_WHITE 0xFFFF  /* 11111 11111 11111 */
+#define COLOR_BLUE  0x001F  /* 00000 00000 11111 */
+#define COLOR_GREEN 0x07E0  /* 00000 11111 00000 */
+#define COLOR_RED   0xF800  /* 11111 00000 00000 */
+
+/**
+ * Static color bar buffers initialized with RGB565 values
+ * Each bar is PIXEL_COUNT pixels filled with a solid color
+ */
+static const uint16_t whiteBar[PIXEL_COUNT] = {[0 ... (PIXEL_COUNT - 1)] = COLOR_WHITE};
+static const uint16_t blueBar[PIXEL_COUNT] = {[0 ... (PIXEL_COUNT - 1)] = COLOR_BLUE};
+static const uint16_t greenBar[PIXEL_COUNT] = {[0 ... (PIXEL_COUNT - 1)] = COLOR_GREEN};
+static const uint16_t redBar[PIXEL_COUNT] = {[0 ... (PIXEL_COUNT - 1)] = COLOR_RED};
+
+
+/**
+ * Clear display with white color
+ */
+void clearDisplay(void) {
+    /* Fill entire screen with white bars (32 bars × 10 pixels each) */
+    for (int idx = 0; idx < NO_OF_BARS; idx++) {
+        drawRegion(PIXEL_WIDTH * idx, 0, PIXEL_WIDTH, BAR_HEIGHT, whiteBar);
+    }
+}
+
+/* Horizontal scroll offset for waterfall animation */
+static uint16_t pixelOffset = 0;
+
+/**
+ * Add a new waterfall bar with hardware scroll
+ * Scrolls display right by PIXEL_WIDTH pixels, writes new bar on left edge
+ * @param colormapIndexArray Array of 24 colormap indices (0-15)
+ * @param noOfEntries Number of valid entries (should be PIXELS_PER_BAR=24)
+ */
+void addBar(const uint16_t *colormapIndexArray, uint16_t noOfEntries) {
+    fillPixelsToBar(colormapIndexArray, noOfEntries);
+    
+    // Draw the bar at current offset position
+    drawRegion(SCREEN_WIDTH - PIXEL_WIDTH - pixelOffset, 0, PIXEL_WIDTH, BAR_HEIGHT, pixBuf.data);
+    
+    // Update hardware scroll address for next iteration
+    st7789_scrollAddress(pixelOffset + PIXEL_WIDTH);
+    
+    // Advance offset for next call
+    pixelOffset += PIXEL_WIDTH;
+    if (pixelOffset >= SCREEN_WIDTH) {
+        pixelOffset = 0;
+    }
+}
+
+/**
+ * Initialize waterfall mode
+ * Sets up display in portrait mode with vertical scroll
+ */
+void waterfall_mode_init(void) {
+    st7789_lcd_init();
+    st7789_setVerticalMode();
+    st7789_setScrollMargins(0, 0);
+    clearDisplay();
+}
+
+/**
+ * FreeRTOS Waterfall Task - Processes audio FFT and displays spectrogram
+ * 
+ * Waits on g_audioQueueWaterfall for audio buffer messages from microphone,
+ * computes FFT using spectrogram processor, accumulates frames, and displays
+ * when a full bar is ready.
+ * 
+ * Runs on Core 1 to isolate display I/O from real-time audio on Core 0.
+ */
+extern SemaphoreHandle_t g_LvglMutex;  /* Display mutex - protect LVGL/display access */
+extern spectrogram_t g_spectrogram;    /* Global spectrogram context */
+
+void waterfall_task(void *parameters) {
+    (void)parameters;
+    
+    printf("[Waterfall] Task started on Core 1\n");
+    fflush(stdout);
+    
+    /* Local accumulator for FFT frame integration */
+    waterfall_accm_t accm;
+    waterfall_accm_init(&accm);
+    
+    /* Local buffer for colormap indices (24 bins) */
+    uint16_t logAccmPower[24];
+    
+    /* Statistics */
+    uint32_t frame_count = 0;
+    uint32_t bar_count = 0;
+    uint32_t last_report = 0;
+    
+    while (1) {
+        /* Wait forever for audio buffer message */
+        AudioBufferMessage_t msg;
+        
+        BaseType_t result = xQueueReceive(g_audioQueueWaterfall, &msg, portMAX_DELAY);
+        
+        if (result != pdTRUE) {
+            printf("[Waterfall] Queue receive failed\n");
+            continue;
+        }
+        
+        /* Check waterfall mode - only process in LIVE_AUDIO mode */
+        if (waterfall_get_mode() != WATERFALL_MODE_LIVE_AUDIO) {
+            continue;  /* Silently skip if not in LIVE_AUDIO mode */
+        }
+        
+        /* Validate message */
+        if (msg.buffer_ptr == NULL || msg.sample_count == 0) {
+            printf("[Waterfall] Invalid message: NULL buffer or 0 samples\n");
+            continue;
+        }
+        
+        /* Process audio samples through spectrogram (FFT + binning) */
+        int spec_result = spectrogram_process_samples(&g_spectrogram, msg.buffer_ptr, msg.sample_count);
+        if (spec_result != 0) {
+            printf("[Waterfall] Spectrogram processing failed: %d\n", spec_result);
+            continue;
+        }
+        
+        frame_count++;
+        
+        /* Get FFT output and add to accumulator */
+        /* CRITICAL FIX: Pass fft_output (complex: 256 real/imag pairs) not fft_magnitude (magnitude: 128 values) */
+        int accm_result = waterfall_accm_add_fft(&accm, g_spectrogram.fft_output, SPECTROGRAM_FFT_SIZE / 2);
+        
+        /* If bar is ready (accm_result == 1), extract and display */
+        if (accm_result == 1) {
+            /* Extract accumulated bar data */
+            if (waterfall_accm_get_bar(&accm, logAccmPower) == 0) {
+                bar_count++;
+                
+                /* Take display mutex before updating screen */
+                if (xSemaphoreTake(g_LvglMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                    /* Render the bar to screen */
+                    fillPixelsToBar(logAccmPower, 24);
+                    addBar(logAccmPower, 24);
+                    
+                    xSemaphoreGive(g_LvglMutex);
+                } else {
+                    printf("[Waterfall] Display mutex timeout\n");
+                    fflush(stdout);
+                }
+            }
+        }
+        
+        /* Periodic reporting */
+        // Frame counting still active, but reporting disabled for cleaner console
+    }
+}
+
+/**
+ * Draw a test bar with all frequency bins set to the same colormap index
+ * Useful for testing display and colormap functionality
+ * @param colormapIndex Index into the current colormap (0-15)
+ */
+void drawTestBar(uint8_t colormapIndex) {
+    /* Create bar with all frequency bins set to the same color index */
+    uint16_t testBar[PIXELS_PER_BAR];
+    
+    /* Clamp index to valid range */
+    if (colormapIndex >= COLORMAP_SIZE) {
+        colormapIndex = COLORMAP_SIZE - 1;
     }
     
-    /* If task didn't exit, something is wrong */
-    if (g_waterfall_task_handle != NULL) {
-        printf("WARNING: Waterfall task did not self-delete within timeout\n");
+    /* Fill array with same colormap index for all frequencies */
+    for (uint16_t i = 0; i < PIXELS_PER_BAR; i++) {
+        testBar[i] = colormapIndex;
     }
     
-    /* Destroy the display canvas */
-    lv_obj_t *canvas = waterfall_get_canvas();
-    if (canvas != NULL) {
-        waterfall_destroy(canvas);
+    /* Add this bar to the waterfall display with hardware scroll */
+    addBar(testBar, PIXELS_PER_BAR);
+}
+
+/**
+ * Draw individual color bars for testing
+ * Draws white, blue, green, and red bars in sequence across the display
+ * Useful for verifying color accuracy and display functionality
+ */
+void drawColorBars(void) {
+    /* Each color is displayed as 8 bars (32 total bars / 4 colors) */
+    const uint16_t bars_per_color = 8;
+    
+    /* Draw white bars */
+    for (uint16_t i = 0; i < bars_per_color; i++) {
+        drawRegion(PIXEL_WIDTH * i, 0, PIXEL_WIDTH, BAR_HEIGHT, whiteBar);
     }
     
-    g_waterfall_server_running = 0;
-    printf("Waterfall Server: Stopped\n");
+    /* Draw blue bars */
+    for (uint16_t i = bars_per_color; i < bars_per_color * 2; i++) {
+        drawRegion(PIXEL_WIDTH * i, 0, PIXEL_WIDTH, BAR_HEIGHT, blueBar);
+    }
+    
+    /* Draw green bars */
+    for (uint16_t i = bars_per_color * 2; i < bars_per_color * 3; i++) {
+        drawRegion(PIXEL_WIDTH * i, 0, PIXEL_WIDTH, BAR_HEIGHT, greenBar);
+    }
+    
+    /* Draw red bars */
+    for (uint16_t i = bars_per_color * 3; i < bars_per_color * 4; i++) {
+        drawRegion(PIXEL_WIDTH * i, 0, PIXEL_WIDTH, BAR_HEIGHT, redBar);
+    }
+}
+
+/**
+ * Get waterfall queue depth
+ * @return Queue depth (0 since FreeRTOS task is removed)
+ */
+uint32_t getWaterfallQueueDepth(void) {
+    return 0;  /* No queue in new hardware-scroll implementation */
 }
 
 /**
  * Check if waterfall server is running
- * External code (e.g., microphone.c) uses this to determine if waterfall task exists
- * 
- * @return 1 if running, 0 if stopped
+ * @return false (waterfall is now part of spectrogram processing)
  */
-int waterfall_server_is_running(void)
-{
-    return g_waterfall_server_running;
+bool waterfallServerIsRunning(void) {
+    return false;  /* Waterfall task removed, now integrated into spectrogram */
 }

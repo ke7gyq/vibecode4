@@ -18,13 +18,14 @@ import math
 import sys
 import os
 import re
+import json
 
 
-def parse_microphone_config(config_path):
-    """Parse filter configuration from microphone_config.h
+def parse_config_json(config_path):
+    """Parse filter configuration from configuration.json
     
     Args:
-        config_path: Path to microphone_config.h
+        config_path: Path to configuration.json
         
     Returns:
         Dictionary with parsed configuration values
@@ -44,33 +45,39 @@ def parse_microphone_config(config_path):
             'DECIMATION_MAX': 128,
         }
     
-    with open(config_path, 'r') as f:
-        content = f.read()
-    
-    # Parse #define values with AUDIO_FILTER_ prefix
-    patterns = {
-        'LP_HZ': (r'#define\s+AUDIO_FILTER_LP_HZ\s+([\d.]+)', float),
-        'HP_HZ': (r'#define\s+AUDIO_FILTER_HP_HZ\s+([\d.]+)', float),
-        'Fs': (r'#define\s+AUDIO_FILTER_FS\s+(\d+)', int),
-        'Decimation': (r'#define\s+AUDIO_FILTER_DECIMATION\s+(\d+)', int),
-        'MaxVolume': (r'#define\s+AUDIO_FILTER_MAX_VOLUME\s+(\d+)', int),
-        'Gain': (r'#define\s+AUDIO_FILTER_GAIN\s+(\d+)', int),
-        'SINCN': (r'#define\s+AUDIO_FILTER_SINCN\s+(\d+)', int),
-        'DECIMATION_MAX': (r'#define\s+AUDIO_FILTER_DECIMATION_MAX\s+(\d+)', int),
-    }
-    
-    for key, (pattern, cast_fn) in patterns.items():
-        match = re.search(pattern, content)
-        if match:
-            config[key] = cast_fn(match.group(1))
-    
-    # Defaults if not found
-    if 'SINCN' not in config:
-        config['SINCN'] = 3
-    if 'DECIMATION_MAX' not in config:
-        config['DECIMATION_MAX'] = 128
-    
-    return config
+    try:
+        with open(config_path, 'r') as f:
+            data = json.load(f)
+        
+        # Extract audio_filter configuration
+        audio_filter = data.get('audio_filter', {})
+        spectrogram = data.get('spectrogram', {})
+        
+        config = {
+            'LP_HZ': float(audio_filter.get('lowpass_hz', 10000)),
+            'HP_HZ': float(audio_filter.get('highpass_hz', 50)),
+            'Fs': int(audio_filter.get('sample_rate_hz', 48000)),
+            'Decimation': int(audio_filter.get('decimation_factor', 64)),
+            'MaxVolume': int(audio_filter.get('max_volume', 16)),
+            'Gain': int(audio_filter.get('gain', 1)),
+            'SINCN': int(audio_filter.get('sinc_order', 3)),
+            'DECIMATION_MAX': int(audio_filter.get('decimation_max', 128)),
+        }
+        
+        return config
+        
+    except json.JSONDecodeError as e:
+        print(f"Warning: Failed to parse {config_path}: {e}")
+        return {
+            'LP_HZ': 10000.0,
+            'HP_HZ': 50.0,
+            'Fs': 48000,
+            'Decimation': 64,
+            'MaxVolume': 16,
+            'Gain': 1,
+            'SINCN': 3,
+            'DECIMATION_MAX': 128,
+        }
 
 
 class OpenPDMFilterLUTGenerator:
@@ -80,11 +87,17 @@ class OpenPDMFilterLUTGenerator:
         """Initialize the generator with configuration
         
         Args:
-            config_path: Path to microphone_config.h for reading parameters
-                        If None, uses default internal configuration
+            config_path: Path to configuration.json for reading parameters
+                        If None, uses default configuration in project root
         """
-        # Load configuration from header file or use defaults
-        self.FILTER_CONFIG = parse_microphone_config(config_path or 'microphone_config.h')
+        # Determine config file path
+        if config_path is None:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            project_root = os.path.dirname(script_dir)
+            config_path = os.path.join(project_root, 'configuration.json')
+        
+        # Load configuration from JSON file
+        self.FILTER_CONFIG = parse_config_json(config_path)
         
         self.SINCN = self.FILTER_CONFIG.get('SINCN', 3)
         self.DECIMATION_MAX = self.FILTER_CONFIG.get('DECIMATION_MAX', 128)
@@ -221,6 +234,15 @@ class OpenPDMFilterLUTGenerator:
             f.write(f'#define LUT_SINCN {self.SINCN}\n')
             f.write(f'#define LUT_DIV_CONST {self.div_const}\n')
             f.write(f'#define LUT_SUB_CONST {self.sub_const}LL\n\n')
+            
+            # Write Waterfall frequency constants
+            f.write('/* Waterfall Display Frequency Constants */\n')
+            f.write('#define WATERFALL_MAX_FREQ_HZ 12000\n')
+            f.write('#ifdef PIXELS_PER_BAR\n')
+            f.write('#define FREQUENCY_BIN_WIDTH (WATERFALL_MAX_FREQ_HZ / PIXELS_PER_BAR)\n')
+            f.write('#else\n')
+            f.write('#define FREQUENCY_BIN_WIDTH (500)\n')
+            f.write('#endif\n\n')
             
             # Write LUT array
             f.write('/* 3D LUT array: lut[256][DECIMATION/8][SINCN] */\n')

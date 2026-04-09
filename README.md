@@ -9,6 +9,23 @@ A complete **Raspberry Pi Pico 2 W** microphone capture and UDP audio streaming 
 
 **Status**: ✅ Complete • ✅ Tested • ✅ Production Ready
 
+## 📝 Recent Updates (April 8, 2026)
+
+- ✅ **Centralized Configuration Infrastructure**
+  - Created `configuration.json` as single source of truth for all parameters
+  - Auto-generates C headers at build time via `scripts/generate_headers.py`
+  - Eliminates configuration scattered across 5+ header files
+  - Python build utilities now read JSON instead of parsing C code
+
+- ✅ **Critical Bugfixes**
+  - Fixed waterfall accumulation buffer overflow (passing wrong FFT data structure)
+  - Fixed UDP startup race condition (auto-start server before scheduler)
+  - Verified zero frame loss at 46.95 kHz stable audio rate
+
+- ✅ **Performance Optimization**
+  - Re-enabled `-O3` aggressive optimization on FFT processing (spectrogram.c)
+  - Dual-core SMP verified stable with proper task affinity
+
 ---
 
 ## 🎯 What This Project Does
@@ -269,19 +286,32 @@ Performance Monitoring:
         CPU Usage: MicrophoneTask 767 ticks, AllTasks <85k combined
 ```
 
-### Configuration Flow
+### Configuration System (Centralized)
 
 ```
-src/microphone_config.h (Filter Parameters)
-        ↓ [BUILD TIME]
-utils/generate_lut.py (reads config)
-        ↓ [CMake custom_command]
-build/generated/LUT_Params.h (pre-calculated LUT)
-        ↓ [Compile]
-src/OpenPDMFilter.c (uses LUT if USE_CONST_LUT=1)
-        ↓
-vibecode4.elf (final executable)
+configuration.json (Single Source of Truth for ALL parameters)
+├── display:         Screen dims, pins, serial clock
+├── audio_filter:    LP/HP Hz, decimation, SINC order, volume, gain
+├── spectrogram:     FFT size, sample rates, bins, magnitude max
+└── waterfall:       Max freq, accumulation frames, pixel/bin mapping
+        │
+        ├─ [BUILD TIME - scripts/generate_headers.py]
+        │   └─→ build/generated/config_constants.h (C #define macros)
+        │
+        ├─ [BUILD TIME - utils/generate_lut.py]
+        │   └─→ build/generated/LUT_Params.h (OpenPDM2PCM LUT)
+        │
+        └─→ [Compile Phase]
+            └─→ All .c source files include auto-generated headers
+                └─→ vibecode4.elf (with all configuration baked in)
 ```
+
+**Key Benefit**: No more scattered configuration across 5+ header files. JSON is:
+- ✅ Structured and maintainable
+- ✅ Auto-generates C headers at build time
+- ✅ Python/Perl scripts read JSON directly (no regex parsing)
+- ✅ Computed values documented (_computed section)
+- ✅ Single source of truth prevents duplication
 
 ---
 
@@ -292,76 +322,145 @@ vibecode4/
 ├── README.md                          ← You are here
 ├── QUICK_START.md                     ← 5-minute deployment guide
 ├── IMPLEMENTATION_SUMMARY.md          ← Complete technical overview
+├── configuration.json                 ← Centralized config (single source of truth) ⭐
 │
-├── CMakeLists.txt                     ← Build system (auto-LUT generation)
+├── CMakeLists.txt                     ← Build system (auto-LUT + header generation)
+├── scripts/
+│   └── generate_headers.py            ← JSON → C headers converter (config_constants.h) ⭐
+│
 ├── src/
 │   ├── main.c                         ← Entry point, task initialization
 │   ├── microphone.h/c                 ← PDM→PCM conversion, PIO/DMA setup
-│   ├── microphone_config.h            ← Centralized filter parameters ⭐
+│   ├── microphone_config.h            ← Legacy (now generated from config.json)
 │   ├── OpenPDMFilter.c                ← STM32 OpenPDM2PCM library
-│   ├── udp_audio_server.c             ← UDP frame streaming (83 Hz)
+│   ├── udp_audio_server.c             ← UDP frame streaming (83 Hz, auto-start)
 │   ├── network.c                      ← Networking stack (UDP helpers)
+│   ├── waterfall.c                    ← Waterfall display + FFT accumulation
+│   ├── spectrogram.c                  ← FFT processing (-O3 optimized)
 │   ├── *.pio                          ← PIO assembly (clock, data sampling)
+│   ├── generated/                     ← Auto-generated at build time
+│   │   ├── config_constants.h         ← Generated from configuration.json
+│   │   └── LUT_Params.h               ← Generated from configuration.json
 │   └── ...
 │
 ├── utils/
 │   ├── README.md                      ← LUT generation pipeline details
-│   ├── generate_lut.py                ← Python LUT generator (config-aware) ⭐
+│   ├── generate_lut.py                ← Python LUT generator (reads config.json) ⭐
 │   ├── udp_audio_client.py            ← Capture UDP frames to WAV
 │   ├── telnet_pcm_client.py           ← Monitor live 48 kHz PCM output
-│   └── LUT_Params.h                   ← Auto-generated (don't edit!)
+│   └── playTone.py                    ← Test utility
 │
 └── build/
     ├── generated/
+    │   ├── config_constants.h         ← Generated @ build time
     │   └── LUT_Params.h               ← Generated @ build time
     └── vibecode4.elf/uf2              ← Compiled binary
 ```
 
 ---
 
-## ⚙️ Configuration
+## ⚙️ Configuration (Centralized via configuration.json)
 
-All audio filter parameters are centralized in **`src/microphone_config.h`**:
+All system parameters are defined in **`configuration.json`** (single source of truth):
 
-| Parameter | Value | Purpose |
-|-----------|-------|---------|
-| `AUDIO_FILTER_LP_HZ` | 10000.0 | Low-pass cutoff (Hz) |
-| `AUDIO_FILTER_HP_HZ` | 50.0 | High-pass cutoff (Hz) |
-| `AUDIO_FILTER_FS` | 48000 | PCM output rate |
-| `AUDIO_FILTER_DECIMATION` | 64 | PDM 3.072M → PCM rate |
-| `AUDIO_FILTER_MAX_VOLUME` | 16 | Output gain scaling |
-| `AUDIO_FILTER_GAIN` | 1 | Additional multiplier |
-| `AUDIO_FILTER_SINCN` | 3 | Sinc³ filter stages |
-
-### Changing Parameters
-
-1. **Edit** `src/microphone_config.h`
-   ```c
-   #define AUDIO_FILTER_MAX_VOLUME    32    /* Increase volume */
-   ```
-
-2. **Rebuild** (LUT auto-regenerates)
-   ```bash
-   cd build && ninja
-   ```
-
-### Pre-Computed vs Dynamic LUT
-
-**Current Mode**: `USE_CONST_LUT=1` (pre-computed const in Flash)
-
-To switch modes, edit `CMakeLists.txt`:
-```cmake
-# Pre-computed const LUT (faster, uses ~108 KB Flash)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DUSE_CONST_LUT=1")
-
-# Dynamic runtime LUT (slower, uses ~18 KB RAM)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DUSE_CONST_LUT=0")
+```json
+{
+  "display": {
+    "screen_width": 320,
+    "screen_height": 240,
+    "pins": { "DIN": 0, "CLK": 1, "CS": 2, "DC": 3, "RESET": 4, "BL": 5 }
+  },
+  "audio_filter": {
+    "sample_rate_hz": 48000,
+    "lowpass_hz": 10000,
+    "highpass_hz": 50,
+    "decimation_factor": 64,
+    "sinc_order": 3,
+    "max_volume": 16,
+    "gain": 1
+  },
+  "spectrogram": {
+    "fft_size": 256,
+    "fft_sample_rate_hz": 6000,
+    "downsample_factor": 8,
+    "num_display_bins": 16
+  },
+  "waterfall": {
+    "max_frequency_hz": 3000,
+    "accumulation_frames": 9,
+    "pixels_per_bar": 24,
+    "bins_per_bar": 5
+  }
+}
 ```
 
-Then rebuild:
-```bash
-cd build && ninja
+### How Configuration Works
+
+1. **Build Time**: CMake generates C headers from JSON:
+   - `scripts/generate_headers.py` → `src/generated/config_constants.h` (all #define macros)
+   - `utils/generate_lut.py` → `src/generated/LUT_Params.h` (optimized lookup tables)
+
+2. **Compile Time**: All source files use auto-generated headers:
+   - No manual header editing needed
+   - Single source of truth prevents duplication
+   - Python build utilities read JSON (no regex parsing of C code)
+
+3. **Runtime**: Compiled constants determine behavior:
+   - Audio filter decimation, sample rates
+   - Display dimensions, pins
+   - Waterfall FFT parameters, accumulation count
+
+### Changing Configuration
+
+**To modify any parameter:**
+
+1. Edit `configuration.json`
+2. Rebuild: `cd build && ninja`
+3. CMake automatically regenerates headers and recompiles
+
+**Example**: Change waterfall max frequency from 3kHz to 6kHz:
+
+```json
+"waterfall": {
+  "max_frequency_hz": 6000,  // ← Change this
+  ...
+}
 ```
+
+Then rebuild and redeploy.
+
+### Auto-Generated Headers (Build Products)
+
+**`src/generated/config_constants.h`** (auto-generated, never manually edit!):
+
+Contains all configuration as C preprocessor macros:
+
+```c
+/* Display config */
+#define SCREEN_WIDTH            320
+#define SCREEN_HEIGHT           240
+#define PIN_DIN                 0
+#define PIN_CLK                 1
+/* ... all pins ... */
+
+/* Audio filter config */
+#define AUDIO_FILTER_FS         48000
+#define AUDIO_FILTER_LP_HZ      10000
+#define AUDIO_FILTER_HP_HZ      50
+#define AUDIO_FILTER_DECIMATION 64
+/* ... all audio parameters ... */
+
+/* Waterfall config */
+#define WATERFALL_MAX_FREQ_HZ   3000
+#define WATERFALL_ACCM_FRAMES   9
+#define WATERFALL_PIXELS_PER_BAR 24
+#define WATERFALL_USED_BINS     120
+/* ... all waterfall parameters ... */
+```
+
+**`src/generated/LUT_Params.h`** (auto-generated from audio_filter config):
+
+Pre-calculated OpenPDM2PCM lookup tables optimized for the decimation factor and filter coefficients in `configuration.json`.
 
 ---
 

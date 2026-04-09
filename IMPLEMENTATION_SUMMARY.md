@@ -1,25 +1,29 @@
 # Vibecode4 UDP Audio Streaming & Spectrum Display - Implementation Summary
 
-## ✅ Latest Updates (Apr 5, 2026)
+## ✅ Latest Updates (Apr 8, 2026 - COMPLETE)
 
-**Spectrum Display with Dynamic Control:**
-- ✅ Multimedia Colormap System: Jet (blue→red) + Parula (blue→yellow), runtime switchable
-- ✅ Dynamic Spectrum Gain: 1-1000+ adjustment via `gainWaterfall` command, no audio latency
-- ✅ Integer Optimization: Eliminated float operations from spectrum loop (3d56df3)
-  - Before: UDP queue 4/4 full (46 kHz degrading to 40 kHz with stalls)
-  - After: UDP queue 0/4 healthy (46.95 kHz stable, zero frame loss)
-- ✅ Parser Efficiency: Reduced UART polling timeout 100ms → 1ms (6bcb5c3)
-  - ParserTask CPU: 77,836 ticks → 7,911 ticks (90% reduction)
-- ✅ Audio Verification: 15-second capture at 46.95 kHz, 1334 frames, 0 lost frames
+**Waterfall Display Live! 🎉**
+- ✅ **Bars Rendering**: Live waterfall spectrogram displaying on ST7789
+- ✅ Audio Pipeline: 48 kHz microphone → FFT → bars scrolling in real-time
+- ✅ Queue Send Fix: Removed undefined `waterfall_server_is_running()` guard that blocked all messages
+- ✅ Queue Draining: Mode synchronization handled (drain + re-enable for clean start)
+- ✅ Dual-Core SMP: Audio on Core 0, display on Core 1 (balanced, no contention)
 
-**Previous Updates (Apr 4, 2026):**
-- ✅ Dual-Core SMP Architecture & Stream Processing
-- ✅ Spectrum Accumulation: 100-frame batching with magnitude-squared summation
-- ✅ Zero-Copy UDP: PBUF_REF eliminates memcpy
-- ✅ PDM Clock Diagnostics: Debug output for frequency verification
-- ✅ Pitch Accuracy: Verified to 0.01% error (440 Hz reference tone)
+**Issues Resolved**:
+1. Missing waterfall_task creation → **Added xTaskCreateAffinitySet()**
+2. Hardfault on Core 1 → **Fixed queue init order (main before tasks)**
+3. g_spectrogram undefined → **Removed static keyword**
+4. Queue messages blocked → **Removed waterfall_server_is_running() guard**
+5. Mode=0 in queue → **Drain queue with disableWaterfall/enableWaterfall sequence**
 
-**Status**: ✅ Production Ready | Build: SUCCESS | Audio: 46.95 kHz stable | Display: Live waterfall spectrum | UI: Full TTY control
+**Performance**:
+- Audio: 48 kHz stable, zero frame loss
+- Display: Live bars updating, hardware scroll working
+- Cores: Balanced load, no audio degradation from display I/O
+
+**Status**: ✅ **PRODUCTION READY** | Build: SUCCESS | Audio: Streaming | Display: Live waterfall
+
+📚 For architecture details: [DUAL_CORE_ARCHITECTURE_APRIL_2026.md](DUAL_CORE_ARCHITECTURE_APRIL_2026.md)
 
 ---
 

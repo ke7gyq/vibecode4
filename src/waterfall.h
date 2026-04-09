@@ -1,207 +1,222 @@
 /**
- * Waterfall Display using LVGL Canvas
+ * Waterfall Display - Optimized Hardware Scrolling
  * 
- * Implements a real-time frequency waterfall display with 16 frequency bands.
- * The display scrolls horizontally (time axis) with vertical frequency bins.
- * Uses LVGL canvas widget for efficient drawing.
- * 
- * The waterfall includes a background task that processes audio from the
- * microphone through the spectrogram FFT and updates the display in real-time.
+ * Ultra-fast waterfall spectrogram display using ST7789 hardware scroll
+ * 24 frequency bins displayed with 10×10 pixel blocks per frequency
  */
 
 #ifndef WATERFALL_H
 #define WATERFALL_H
 
 #include <stdint.h>
-#include <lvgl.h>
-#include "spectrogram.h"
+#include <stdbool.h>
 
-/* Forward declare the FreeRTOS task handle as an opaque type */
-/* This avoids including FreeRTOS.h which can cause initialization order issues */
-struct tskTaskControlBlock;
-typedef struct tskTaskControlBlock* TaskHandle_t;
+/* Display geometry constants */
+#define BAR_HEIGHT          240     /* Total vertical pixels */
+#define PIXEL_WIDTH         10      /* Pixels wide per frequency bin */
+#define PIXEL_HEIGHT        10      /* Pixels tall per frequency bin */
+#define PIXELS_PER_BAR      (BAR_HEIGHT / PIXEL_HEIGHT)  /* 24 frequency bins */
+#define NO_OF_BARS          (320 / PIXEL_WIDTH) /* 32 bars across */
+#define PIXEL_COUNT         (BAR_HEIGHT * PIXEL_WIDTH)   /* 2400 pixels per bar */
 
-/* Display dimensions */
-#define WATERFALL_WIDTH    320      /* Horizontal pixels (time axis) */
-#define WATERFALL_HEIGHT   240      /* Vertical pixels (frequency axis) */
-#define WATERFALL_FREQ_BANDS 16     /* Number of frequency bins */
-#define WATERFALL_BAR_HEIGHT (WATERFALL_HEIGHT / WATERFALL_FREQ_BANDS)  /* Pixels per band (15) */
-
-/* X-axis granularity: pixels shifted per addWaterfall call (tunable) */
-#define WATERFALL_X_GRANULARITY 10  /* Shift 10 pixels per call */
-
-/* ============== Data Types ============== */
+/* Screen dimensions */
+#define SCREEN_WIDTH        320
+#define SCREEN_HEIGHT       240
 
 /**
- * Waterfall bar - contains raw magnitude-squared values from FFT for each frequency bin
- * Waterfall display will apply log scaling and color mapping
+ * Pixel buffer structure
+ * Union allows access as flat array or 3D indexed array
+ * 24 frequency bins × 10 pixels wide × 10 pixels tall = 2400 pixels
  */
-typedef struct {
-    uint32_t magnitude_sq[WATERFALL_FREQ_BANDS];  /* Magnitude squared for each frequency bin */
-} t_waterfallBar;
+typedef union {
+    uint16_t data[PIXEL_COUNT];                          /* Flat array (2400 elements) */
+    uint16_t pixels[PIXELS_PER_BAR][PIXEL_HEIGHT][PIXEL_WIDTH];  /* 3D array [color][height][width] */
+} pixel_buffer_t;
 
-/* Canvas buffer configuration for LVGL canvas widget */
-#define WATERFALL_CANVAS_BIT_DEPTH LV_COLOR_DEPTH
+/* ============== Public API ============== */
 
 /**
- * Initialize the waterfall display canvas
- * Creates a new LVGL canvas and clears the screen
- * Should be called before adding waterfall data
- * 
- * @return pointer to the canvas object, or NULL on failure
+ * Set the active colormap
+ * @param selectedColormapIndex 0=Jet, 1=Parula (wraps modulo available)
  */
-lv_obj_t * waterfall_init(void);
+void setColorMap(uint16_t selectedColormapIndex);
 
 /**
- * Destroy the waterfall canvas and clear the screen
- * 
- * @param canvas pointer to the canvas object
- */
-void waterfall_destroy(lv_obj_t *canvas);
-
-/**
- * Add a waterfall bar to the display
- * Shifts the display left and adds a new bar on the right
- * Applies log scaling and color mapping to the magnitude-squared values
- * 
- * @param canvas pointer to the canvas object
- * @param bar pointer to t_waterfallBar containing magnitude-squared values for 16 frequency bins
- */
-void waterfall_add_column(lv_obj_t *canvas, const t_waterfallBar *bar);
-
-/**
- * Get the current waterfall canvas
- * 
- * @return pointer to the current canvas object, or NULL if not initialized
- */
-lv_obj_t * waterfall_get_canvas(void);
-
-/**
- * Clear the waterfall display while maintaining the canvas
- * 
- * @param canvas pointer to the canvas object
- */
-void waterfall_clear(lv_obj_t *canvas);
-
-/**
- * Convert amplitude level (color index) to magnitude_sq value
- * Used by parser/external code for manual control - maps color_index to corresponding magnitude_sq
- * 
- * @param color_index amplitude level (0-15, where 0=dark blue, 15=bright yellow)
- * @return magnitude_sq value that maps to the specified color via log scaling
- */
-uint32_t waterfall_color_index_to_magnitude_sq(uint8_t color_index);
-
-/**
- * Set the spectrogram context for the waterfall task to use
- * Called by main.c to attach the spectrogram processor
- * 
- * @param spec pointer to initialized spectrogram_t context
- */
-void waterfall_set_spectrogram(spectrogram_t *spec);
-
-/**
- * Get the current waterfall queue depth for diagnostics
- * Returns the number of pending audio buffers in the waterfall processing queue
- * 
- * @return Number of messages in queue (0-4)
- */
-UBaseType_t waterfall_get_queue_depth(void);
-
-/**
- * Set the frame skip rate for waterfall display updates
- * Process 1 of every N buffers to control display update rate
- * 
- * @param skip_rate Number of buffers to skip (1=every buffer, 2=every other, etc.)
- */
-void waterfall_set_frame_skip_rate(uint8_t skip_rate);
-
-/**
- * Get accumulation progress for current spectrum batch
- * In accumulation mode, returns how many frames have been accumulated (0-99)
- * When this reaches 100, the spectrum is averaged and displayed
- * 
- * @return Number of frames accumulated toward next display update (0-99)
- */
-uint32_t waterfall_get_accumulation_progress(void);
-
-/**
- * Get the current frame skip rate
- * 
- * @return Current skip rate
- */
-uint8_t waterfall_get_frame_skip_rate(void);
-
-/**
- * Set the waterfall spectrum gain
- * Gain is a percentage value (1-1000+)
- * Internally computed as gainSquared = (gain/100)^2 for efficient spectrum scaling
- * 
- * @param gain New gain value (1 or higher)
- */
-void waterfall_set_gain(uint32_t gain);
-
-/**
- * Get the current waterfall spectrum gain
- * 
- * @return Current gain value
- */
-uint32_t waterfall_get_gain(void);
-
-/**
- * Get the squared gain value used internally for spectrum scaling
- * Returns the scaled gain multiplier (scaled by 10000)
- * Example: gain=10 returns 100 (represents 0.01 when divided by 10000)
- * 
- * @return Scaled gain squared value (uint32_t)
- */
-uint32_t waterfall_get_gain_squared(void);
-
-/**
- * Set the waterfall colormap by index
- * Available colormaps: 0=Jet (default), 1=Parula
- * Invalid indices default to Jet (0)
- * 
- * @param index Colormap index
- */
-void waterfall_set_colormap(uint32_t index);
-
-/**
- * Get the current waterfall colormap index
- * 
+ * Get the current colormap index
  * @return Current colormap index (0=Jet, 1=Parula)
  */
-uint32_t waterfall_get_colormap(void);
+uint16_t getColorMap(void);
 
 /**
- * Waterfall task handle - NULL if waterfall task not running
- * Check this to determine if waterfall display is active
- * External code (e.g., microphone.c) should only queue data if this is non-NULL
+ * Clear the entire display with white color
+ * Fills all 32 bars with white pixels
  */
-extern TaskHandle_t g_waterfall_task_handle;
+void clearDisplay(void);
 
 /**
- * Start the waterfall display server
- * Initializes display canvas and creates processing task
- * Mirrors UDP server interface for consistency
+ * Add a new waterfall bar with hardware scroll
+ * Applies colormap to 24 frequency indices, expands to 10×10 pixel blocks,
+ * scrolls the display, and writes the new bar
  * 
- * @return 0 on success, -1 on failure
+ * Performs >100 updates per second using DMA and hardware scroll
+ * 
+ * @param colormapIndexArray Array of 24 colormap indices (0-15)
+ * @param noOfEntries Number of valid entries (should be 24/PIXELS_PER_BAR)
  */
-int waterfall_server_start(void);
+void addBar(const uint16_t *colormapIndexArray, uint16_t noOfEntries);
 
 /**
- * Stop the waterfall display server
- * Destroys display canvas and stops processing task
- * Mirrors UDP server interface for consistency
+ * Convert colormap indices to pixel buffer
+ * Internal function that maps colormap indices to RGB565 colors
+ * and expands to 10×10 pixel blocks
+ * 
+ * @param colormapIndexArray Array of 24 colormap indices (0-15)
+ * @param noOfEntries Number of valid entries
  */
-void waterfall_server_stop(void);
+void fillPixelsToBar(const uint16_t *colormapIndexArray, uint16_t noOfEntries);
+
+/**
+ * Initialize waterfall display mode
+ * Initializes ST7789 in portrait mode with vertical scroll hardware
+ * Clears the screen to white
+ */
+void waterfall_mode_init(void);
+
+/**
+ * FreeRTOS Waterfall Task - Processes audio FFT and displays spectrogram
+ * 
+ * Waits on g_audioQueueWaterfall for audio buffer messages, computes FFT,
+ * accumulates frames, and displays waterfall bars. Runs on Core 1.
+ * 
+ * @param parameters Unused (FreeRTOS task parameter)
+ */
+void waterfall_task(void *parameters);
+
+/* ============== Display Driver Functions (from st7789.c) ============== */
+
+/**
+ * Initialize ST7789 LCD hardware
+ * Sets up PIO, GPIO, DMA, and initializes controller
+ * @return 0 on success
+ */
+int st7789_lcd_init(void);
+
+/**
+ * Set display to vertical mode for waterfall (portrait)
+ */
+void st7789_setVerticalMode(void);
+
+/**
+ * Set scroll margins
+ * @param top Fixed lines at top
+ * @param bottom Fixed lines at bottom
+ */
+void st7789_setScrollMargins(uint16_t top, uint16_t bottom);
+
+/**
+ * Set hardware vertical scroll address
+ * @param vsp Vertical scroll position (0-319)
+ */
+void st7789_scrollAddress(uint16_t vsp);
+
+/**
+ * Draw a rectangular region
+ * @param x0 X start coordinate
+ * @param y0 Y start coordinate
+ * @param width Width in pixels
+ * @param height Height in pixels
+ * @param data Pointer to RGB565 pixel data
+ */
+void drawRegion(uint16_t x0, uint16_t y0, uint16_t width, uint16_t height, const uint16_t *data);
+
+/**
+ * Get current waterfall gain value
+ * Defined in spectrogram.c - applies linear gain before log scaling
+ * @return Gain value * GAIN_NORMALIZATION (e.g., 10 = 1.0x default)
+ */
+uint32_t getWaterfallGain(void);
+
+/**
+ * Set waterfall gain value
+ * Defined in spectrogram.c - applies to magnitude before logarithmic scaling
+ * @param gain Gain value * GAIN_NORMALIZATION (e.g., 10 = 1.0x, 20 = 2.0x)
+ */
+void setWaterfallGain(uint32_t gain);
+
+/**
+ * Draw a test bar with all frequency bins set to the same colormap index
+ * Useful for testing display and colormap functionality
+ * @param colormapIndex Index into the current colormap (0-15)
+ */
+void drawTestBar(uint8_t colormapIndex);
+
+/**
+ * Draw individual color bars for testing
+ * Displays white, blue, green, and red bars in sequence
+ * Useful for verifying color accuracy and display functionality
+ */
+void drawColorBars(void);
+
+/**
+ * Get waterfall queue depth
+ * @return Queue depth (0 since FreeRTOS task is removed)
+ */
+uint32_t getWaterfallQueueDepth(void);
 
 /**
  * Check if waterfall server is running
- * Used by microphone task to determine if queueing data is safe
- * 
- * @return 1 if running, 0 if stopped
+ * @return false (waterfall is now part of spectrogram processing)
  */
-int waterfall_server_is_running(void);
+bool waterfallServerIsRunning(void);
+
+/* ============== Waterfall Display Mode Management ============== */
+
+/**
+ * Waterfall mode enum (defined in parser.c)
+ * Controls whether audio FFT data feeds the waterfall or display test functions have exclusive control
+ */
+typedef enum {
+    WATERFALL_MODE_OFF = 0,           /* Waterfall disabled */
+    WATERFALL_MODE_TEST = 1,          /* Test mode (test functions have exclusive control) */
+    WATERFALL_MODE_LIVE_AUDIO = 2     /* Live audio mode (audio task feeds FFT data) */
+} waterfall_mode_t;
+
+/**
+ * Get current waterfall display mode
+ * @return Current mode (OFF, TEST, or LIVE_AUDIO)
+ */
+waterfall_mode_t waterfall_get_mode(void);
+
+/**
+ * Set waterfall display mode
+ * When switching to TEST mode, audio task will stop feeding FFT data.
+ * When switching to LIVE_AUDIO mode, audio task will resume feeding FFT data.
+ * @param mode New mode (OFF, TEST, or LIVE_AUDIO)
+ */
+void waterfall_set_mode(waterfall_mode_t mode);
+
+/**
+ * Check if audio task should feed FFT data to waterfall
+ * Called by audio processing pipeline before calling waterfall_accm_add_fft()
+ * @return 1 if audio should feed waterfall, 0 otherwise
+ */
+int waterfall_should_feed_fft(void);
+
+/**
+ * Get pointer to global waterfall accumulator (for audio task)
+ * Called by audio processing pipeline to feed FFT data
+ * Defined in parser.c - returns NULL if not in LIVE_AUDIO mode (prevents unintended data feeding)
+ * @return Pointer to waterfall accumulator (or NULL if not in LIVE_AUDIO mode)
+ */
+void* waterfall_get_accumulator(void);
+
+/* ============== Compatibility Aliases ============== */
+#define waterfall_get_gain() getWaterfallGain()
+#define waterfall_set_gain(g) setWaterfallGain(g)
+#define waterfall_get_colormap() getColorMap()
+#define waterfall_set_colormap(idx) setColorMap((uint16_t)(idx))
+#define waterfall_draw_bar(idx) drawTestBar((uint8_t)(idx))
+#define waterfall_get_queue_depth() getWaterfallQueueDepth()
+#define waterfall_server_is_running() waterfallServerIsRunning()
 
 #endif /* WATERFALL_H */
