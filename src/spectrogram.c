@@ -570,16 +570,25 @@ static const uint32_t logAccmLookup[LOGACCM_TABLE_SIZE] = {
  * @return colormap index 0-15
  */
 static uint8_t power_to_colormap_index(uint32_t powerSquared) {
-    /* Search from highest index down to find threshold that is exceeded */
-    for (int32_t logPower = LOGACCM_TABLE_SIZE - 1; logPower >= 0; logPower--) {
-        if (logAccmLookup[logPower] <= powerSquared) {
-            /* Return the index, but clamp to valid colormap range (0-15) */
-            return (uint8_t)(logPower > 15 ? 15 : logPower);
-        }
+    /* Extract upper 16 bits where the threshold values reside */
+    uint32_t resultant = powerSquared >> 16;
+    
+    /* If resultant is 0, return index 0 */
+    if (resultant == 0) {
+        return 0;
     }
     
-    /* Should not reach here, but return 0 as fallback */
-    return 0;
+    /* Count right-shifts by 1 bit until resultant becomes 0 */
+    uint8_t index = 0;
+    do {
+        resultant >>= 1;
+        index++;
+        if (resultant == 0) {
+            break;
+        }
+    } while (index < 15);  /* Clamp to maximum colormap index */
+    
+    return index;
 }
 
 /**
@@ -627,11 +636,10 @@ int waterfall_accm_add_fft(waterfall_accm_t *accm, const q15_t *fft_output, uint
         
         /* TODO: Handle FFT bin 0 specially
          * FFT[0] contains both DC component (real part) and Nyquist frequency (imag part)
-         * These need proper handling. For now, zero them out to avoid display artifacts.
-         * Also zero out first few low-frequency bins (0-3) to remove DC offset and 60 Hz hum
-         * This removes energy below ~188 Hz, which is below human speech range anyway
+         * Zero only bin 0 (DC + Nyquist), but keep bins 1-3 to observe CIC3 filter response
+         * Bins 1-2 (~23-47 Hz) are in the CIC3 high-pass cutoff region and useful for validation
          */
-        if (bin <= 3) {  /* Skip DC and first 3 low-freq bins (0-188 Hz) */
+        if (bin == 0) {  /* Skip DC component and Nyquist only */
             real = 0;
             imag = 0;
         }
