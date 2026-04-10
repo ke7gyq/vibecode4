@@ -11,7 +11,9 @@ This directory contains Python utilities for audio capture, testing, and analysi
 - **telnet_pcm_client.py** - Real-time PCM level monitoring via Telnet
 
 **Audio Testing & Analysis:**
-- **playTone.py** - Generates 440 Hz reference tone (useful for pitch testing)
+- **playTone.py** - Enhanced tone generator with pygame audio playback, frequency/duration options, and WAV file save
+- **playTone** - Bash wrapper for playTone.py (handles venv activation)
+- **venv/** - Python virtual environment with pygame and numpy pre-installed
 - **analyzePitch.py** - FFT-based pitch detection (verifies audio quality and sampling rate)
 
 **Filter Configuration:**
@@ -21,6 +23,80 @@ This directory contains Python utilities for audio capture, testing, and analysi
 ## ⚠️ Important: Auto-Generated During Build
 
 **LUT_Params.h is automatically generated during the CMake build process.** You should NOT manually edit it. Instead, modify filter parameters in [../src/microphone_config.h](../src/microphone_config.h), and the LUT will be regenerated automatically.
+
+## Enhanced Tone Generator (playTone.py)
+
+### Quick Start
+
+```bash
+cd utils/
+
+# Default: 440 Hz, 5 seconds, plays to speakers
+./playTone
+
+# Custom frequency and duration
+./playTone --frequency 1000 --duration 2
+
+# Play and save
+./playTone --frequency 880 --save tone.wav
+
+# Save only, no playback
+./playTone --save-only test.wav
+
+# Show all options
+./playTone --help
+```
+
+### Features
+
+- ✅ **Plays to speakers by default** (pygame mixer)
+- ✅ **Configurable frequency** (-f/--frequency in Hz)
+- ✅ **Configurable duration** (-d/--duration in seconds)
+- ✅ **Optional WAV file save** (--save or --save-only)
+- ✅ **Multiple playback backends**: Pygame (primary), sounddevice (fallback), system players (aplay/paplay)
+- ✅ **48 kHz sample rate** (matches RP2350 configuration)
+- ✅ **Graceful degradation** if audio libraries unavailable
+
+### Setup (First Time Only)
+
+The virtual environment is pre-configured with pygame and numpy:
+
+```bash
+cd utils
+source venv/bin/activate
+pip install pygame numpy
+```
+
+The bash wrapper `playTone` handles activation automatically, so you can just run `./playTone` directly.
+
+### Usage Examples
+
+**Test different frequencies on waterfall display:**
+```bash
+./playTone --frequency 440 --duration 5   # See bottom-left corner light up
+./playTone --frequency 1000 --duration 5  # Middle bands
+./playTone --frequency 2000 --duration 5  # Top bands (near max 2.84 kHz)
+```
+
+**Generate reference tone for remote testing:**
+```bash
+./playTone --frequency 1000 --duration 10 --save reference_1khz.wav
+```
+
+**Silent test (save only):**
+```bash
+./playTone --frequency 1000 --save-only test.wav
+# Play manually later: aplay test.wav
+```
+
+### Compatibility
+
+- **Linux**: Works with PipeWire (pygame), ALSA (aplay), or system audio
+- **macOS**: Works with pygame mixer (requires homebrew installation)
+- **Windows**: Works with pygame mixer and Windows audio API
+- **Raspberry Pi**: Tested and verified with Raspberry Pi 4+ audio output
+
+---
 
 ## Filter Configuration
 
