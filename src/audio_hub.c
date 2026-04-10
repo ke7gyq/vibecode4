@@ -10,9 +10,11 @@
 typedef struct {
     AudioBufferMessage_t buffer;
     SemaphoreHandle_t mutex;           /* Protects reads/writes to buffer */
-    SemaphoreHandle_t broadcast_sem;   /* Signals new audio available to all consumers */
+    EventGroupHandle_t broadcast_events; /* Event group to signal all consumers */
     int initialized;
 } AudioHub;
+
+#define AUDIO_BROADCAST_BIT (1 << 0)  /* Bit to signal when audio is ready */
 
 static AudioHub g_audio_hub = {0};
 
@@ -30,9 +32,9 @@ int audio_hub_init(void) {
         return -1;
     }
     
-    /* Create binary semaphore for broadcast (initially blocked for consumers) */
-    g_audio_hub.broadcast_sem = xSemaphoreCreateBinary();
-    if (g_audio_hub.broadcast_sem == NULL) {
+    /* Create event group for broadcast (multiple consumers can wait on same event) */
+    g_audio_hub.broadcast_events = xEventGroupCreate();
+    if (g_audio_hub.broadcast_events == NULL) {
         vSemaphoreDelete(g_audio_hub.mutex);
         return -1;
     }
@@ -64,8 +66,8 @@ int audio_hub_broadcast(const AudioBufferMessage_t *msg) {
     /* Release mutex */
     xSemaphoreGive(g_audio_hub.mutex);
     
-    /* Wake all consumers (they all get the same buffer) */
-    xSemaphoreGive(g_audio_hub.broadcast_sem);
+    /* Set event bit to wake ALL waiting consumers simultaneously */
+    xEventGroupSetBits(g_audio_hub.broadcast_events, AUDIO_BROADCAST_BIT);
     
     return 0;
 }
@@ -78,8 +80,16 @@ int audio_hub_receive(AudioBufferMessage_t *msg, uint32_t timeout_ms) {
         return -1;
     }
     
-    /* Wait for producer to broadcast new audio */
-    if (xSemaphoreTake(g_audio_hub.broadcast_sem, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) {
+    /* Wait for producer to broadcast new audio (event group wakes all consumers) */
+    EventBits_t bits = xEventGroupWaitBits(
+        g_audio_hub.broadcast_events,
+        AUDIO_BROADCAST_BIT,          /* Wait for this bit */
+        pdTRUE,                        /* Clear bit after wait */
+        pdFALSE,                       /* Don't wait for all bits (we only have one) */
+        pdMS_TO_TICKS(timeout_ms)
+    );
+    
+    if (!(bits & AUDIO_BROADCAST_BIT)) {
         return -1;  /* Timeout or error */
     }
     
@@ -128,8 +138,8 @@ void audio_hub_cleanup(void) {
         vSemaphoreDelete(g_audio_hub.mutex);
     }
     
-    if (g_audio_hub.broadcast_sem) {
-        vSemaphoreDelete(g_audio_hub.broadcast_sem);
+    if (g_audio_hub.broadcast_events) {
+        vEventGroupDelete(g_audio_hub.broadcast_events);
     }
     
     g_audio_hub.initialized = 0;
