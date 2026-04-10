@@ -6,10 +6,13 @@
 
 #include "pico/cyw43_arch.h"
 #include "pico/time.h"
+#include "pico/flash.h"
+#include "hardware/flash.h"
 #include "FreeRTOS.h"
 #include "task.h"
 #include "network.h"
 #include "microphone.h"  /* For g_micDebug flag */
+#include "tcp_server.h"  /* For udp_server_start() on WiFi connect */
 
 // lwIP includes
 #include "lwip/netif.h"
@@ -39,6 +42,42 @@ static char g_target_password[64] = {0};
 static uint32_t g_connection_start_time = 0;
 static const uint32_t WIFI_CONNECT_TIMEOUT_MS = 30000;  // 30 second timeout (lwIP DHCP takes time)
 static bool g_dhcp_started = false;
+static bool g_udp_auto_started = false;  /* Track if UDP was auto-started on WiFi connect */
+static uint32_t g_udp_startup_time = 0;  /* When to start UDP (non-blocking delay) */
+static const uint32_t UDP_START_DELAY_MS = 2000;  /* 2-second delay for netif initialization */
+
+/* ==================== WiFi Credentials Flash Storage ==================== */
+
+#define WIFI_CREDENTIALS_MAGIC 0x57494649  /* 'WIFI' in ASCII */
+#define WIFI_CREDENTIALS_VERSION 1
+
+/* Credentials structure stored in flash */
+typedef struct {
+    uint32_t magic;              /* Magic number for validation */
+    uint8_t version;             /* Structure version */
+    uint8_t reserved[3];         /* Padding */
+    char ssid[33];               /* SSID (max 32 chars + null) */
+    char password[64];           /* Password (max 63 chars + null) */
+    uint32_t crc32;              /* CRC32 checksum */
+} wifi_credentials_t;
+
+/* Flash storage: use last 4KB of flash for credentials (before end of storage) */
+/* RP2350 has 8MB or 16MB flash depending on variant */
+#define WIFI_CREDENTIALS_OFFSET (PICO_FLASH_SIZE_BYTES - 4096)
+
+/**
+ * Simple CRC32 calculation
+ */
+static uint32_t crc32_calc(const uint8_t *data, size_t len) {
+    uint32_t crc = 0xFFFFFFFF;
+    for (size_t i = 0; i < len; i++) {
+        crc ^= data[i];
+        for (int j = 0; j < 8; j++) {
+            crc = (crc >> 1) ^ (0xEDB88320 & -(crc & 1));
+        }
+    }
+    return crc ^ 0xFFFFFFFF;
+}
 
 /**
  * Callback for WiFi scan results
@@ -179,6 +218,7 @@ int network_connect(const char *ssid, const char *password) {
     g_wifi_state = WIFI_STATE_CONNECTING;
     g_connection_start_time = to_ms_since_boot(get_absolute_time());
     g_dhcp_started = false;
+    g_udp_auto_started = false;  /* Reset UDP flag for this connection attempt */
     
     // Initiate the connection with password
     int result = cyw43_arch_wifi_connect_async(g_target_ssid, g_target_password, CYW43_AUTH_WPA2_AES_PSK);
@@ -312,13 +352,91 @@ int network_get_rssi(void) {
 }
 
 /**
- * WiFi network task
+ * Get current IP address assigned by DHCP
+ * Copies IP address string to provided buffer
+ */
+int network_get_ip_address(char *ip_str, int len) {
+    if (ip_str == NULL || len < 16) {
+        return 0;  // Invalid buffer
+    }
+    
+    // Only return IP if we are connected
+    if (network_is_connected() != 1) {
+        snprintf(ip_str, len, "NOT CONNECTED");
+        return 0;
+    }
+    
+    // Get the network interface
+    struct netif *netif = netif_find("cyw");
+    if (netif == NULL) {
+        netif = netif_list;
+    }
+    
+    if (netif == NULL) {
+        snprintf(ip_str, len, "NO INTERFACE");
+        return 0;
+    }
+    
+    // Check if we have a valid IP address
+    if (ip4_addr_isany_val(netif->ip_addr)) {
+        snprintf(ip_str, len, "WAITING FOR DHCP");
+        return 0;
+    }
+    
+    // Copy IP address string
+    const char *ip_cstr = ip4addr_ntoa(&netif->ip_addr);
+    snprintf(ip_str, len, "%s", ip_cstr);
+    return 1;
+}
+
+/**
+ * Print detailed network interface diagnostics
+ * Shows netif flags, link status, etc.
+ */
+void network_print_netif_status(void) {
+    struct netif *netif = netif_find("cyw");
+    if (netif == NULL) {
+        netif = netif_list;
+    }
+    
+    if (netif == NULL) {
+        printf("[NETIF] No network interface found\n");
+        return;
+    }
+    
+    printf("\n[NETIF] Network Interface: %c%c\n", netif->name[0], netif->name[1]);
+    printf("[NETIF] IP Address: %s\n", ip4addr_ntoa(&netif->ip_addr));
+    printf("[NETIF] Gateway: %s\n", ip4addr_ntoa(&netif->gw));
+    printf("[NETIF] Netmask: %s\n", ip4addr_ntoa(&netif->netmask));
+    printf("[NETIF] Flags: 0x%x\n", netif->flags);
+    printf("[NETIF]   - UP: %s\n", (netif->flags & NETIF_FLAG_UP) ? "YES" : "NO");
+    printf("[NETIF]   - BROADCAST: %s\n", (netif->flags & NETIF_FLAG_BROADCAST) ? "YES" : "NO");
+    printf("[NETIF]   - LINK_UP: %s\n", (netif->flags & NETIF_FLAG_LINK_UP) ? "YES" : "NO");
+    printf("[NETIF] MTU: %u\n", netif->mtu);
+    printf("[NETIF] hwaddr_len: %u\n", netif->hwaddr_len);
+    printf("\n");
+}
+
+/**
  * Polls WiFi status and lwIP timers in background
  */
 void network_task(void *parameters) {
     (void)parameters;  // Unused
     
     printf("Network task started\n");
+    
+    /* Try to auto-connect with saved credentials */
+    static bool auto_connect_attempted = false;
+    if (!auto_connect_attempted) {
+        auto_connect_attempted = true;
+        if (network_credentials_exist()) {
+            char ssid[33], password[64];
+            if (network_credentials_load(ssid, password)) {
+                printf("[NETWORK] Auto-connecting with saved credentials (SSID: %s)\n", ssid);
+                network_connect(ssid, password);
+            }
+        }
+    }
     
     // Periodic polling loop
     uint32_t last_check = to_ms_since_boot(get_absolute_time());
@@ -349,7 +467,30 @@ void network_task(void *parameters) {
             
             if (g_wifi_state == WIFI_STATE_CONNECTING) {
                 // Check if connection succeeded
-                network_is_connected();
+                int connected = network_is_connected();
+                
+                // When WiFi first connects, set a timer for UDP startup
+                if (connected && g_udp_startup_time == 0) {
+                    g_udp_startup_time = now + UDP_START_DELAY_MS;
+                    printf("[NETWORK] WiFi connected! UDP will auto-start in %lu ms\n", UDP_START_DELAY_MS);
+                    fflush(stdout);
+                }
+            }
+            
+            // Check if it's time to start UDP (independent of WiFi state)
+            // This runs every 1 second after a timer was set
+            if (g_udp_startup_time > 0 && !g_udp_auto_started && now >= g_udp_startup_time) {
+                g_udp_auto_started = true;
+                g_udp_startup_time = 0;  // Reset for next time
+                
+                printf("[NETWORK] Network interface ready. Auto-starting UDP server...\n");
+                fflush(stdout);
+                if (udp_server_start() == 0) {
+                    printf("[NETWORK] UDP server auto-started successfully\n");
+                } else {
+                    printf("[NETWORK] WARNING: UDP server failed to auto-start\n");
+                }
+                fflush(stdout);
             }
         }
         
@@ -367,4 +508,107 @@ void network_task(void *parameters) {
         // lwIP needs regular polling for timers and DHCP state machine
         vTaskDelay(pdMS_TO_TICKS(20));
     }
+}
+
+/* ==================== WiFi Credentials Flash Storage Implementation ==================== */
+
+int network_credentials_save(const char *ssid, const char *password) {
+    if (ssid == NULL || password == NULL) {
+        printf("ERROR: Invalid SSID or password pointer\n");
+        return -1;
+    }
+    
+    if (strlen(ssid) > 32 || strlen(password) > 63) {
+        printf("ERROR: SSID too long (max 32) or password too long (max 63)\n");
+        return -1;
+    }
+    
+    wifi_credentials_t creds;
+    memset(&creds, 0xFF, sizeof(creds));  /* Flash erase pattern */
+    
+    /* Fill structure */
+    creds.magic = WIFI_CREDENTIALS_MAGIC;
+    creds.version = WIFI_CREDENTIALS_VERSION;
+    strncpy(creds.ssid, ssid, 32);
+    creds.ssid[32] = '\0';
+    strncpy(creds.password, password, 63);
+    creds.password[63] = '\0';
+    
+    /* Calculate CRC over data before CRC field */
+    creds.crc32 = crc32_calc((uint8_t*)&creds, offsetof(wifi_credentials_t, crc32));
+    
+    /* Write to flash using FreeRTOS critical section */
+    printf("[FLASH] Saving WiFi credentials to flash at offset 0x%x\n", WIFI_CREDENTIALS_OFFSET);
+    
+    /* Use FreeRTOS critical section instead of raw interrupt disable */
+    taskENTER_CRITICAL();
+    {
+        flash_range_erase(WIFI_CREDENTIALS_OFFSET, 4096);  /* Erase 4KB sector */
+        flash_range_program(WIFI_CREDENTIALS_OFFSET, (uint8_t*)&creds, sizeof(creds));
+    }
+    taskEXIT_CRITICAL();
+    
+    printf("[FLASH] WiFi credentials saved successfully\n");
+    return 0;
+}
+
+int network_credentials_load(char *ssid, char *password) {
+    if (ssid == NULL || password == NULL) {
+        printf("ERROR: Invalid output buffer pointer\n");
+        return 0;
+    }
+    
+    /* Read from flash (XIP region, direct memory access) */
+    const wifi_credentials_t *creds = (const wifi_credentials_t *)(XIP_BASE + WIFI_CREDENTIALS_OFFSET);
+    
+    /* Validate magic and version */
+    if (creds->magic != WIFI_CREDENTIALS_MAGIC) {
+        if (creds->magic != 0xFFFFFFFF) {  /* Not erased, but wrong magic */
+            printf("[FLASH] Invalid credentials magic: 0x%x (expected 0x%x)\n", 
+                   creds->magic, WIFI_CREDENTIALS_MAGIC);
+        }
+        return 0;  /* Not found */
+    }
+    
+    if (creds->version != WIFI_CREDENTIALS_VERSION) {
+        printf("[FLASH] Unsupported credential version: %u\n", creds->version);
+        return 0;
+    }
+    
+    /* Validate CRC */
+    uint32_t expected_crc = crc32_calc((uint8_t*)creds, offsetof(wifi_credentials_t, crc32));
+    if (expected_crc != creds->crc32) {
+        printf("[FLASH] Credentials CRC mismatch: got 0x%x, expected 0x%x\n", 
+               creds->crc32, expected_crc);
+        return 0;  /* Corrupted */
+    }
+    
+    /* Extract credentials */
+    strncpy(ssid, creds->ssid, 32);
+    ssid[32] = '\0';
+    strncpy(password, creds->password, 63);
+    password[63] = '\0';
+    
+    printf("[FLASH] WiFi credentials loaded: SSID='%s'\n", ssid);
+    return 1;  /* Success */
+}
+
+int network_credentials_clear(void) {
+    printf("[FLASH] Clearing WiFi credentials from flash\n");
+    
+    /* Use FreeRTOS critical section instead of raw interrupt disable */
+    taskENTER_CRITICAL();
+    {
+        flash_range_erase(WIFI_CREDENTIALS_OFFSET, 4096);  /* Erase 4KB sector */
+    }
+    taskEXIT_CRITICAL();
+    
+    printf("[FLASH] WiFi credentials cleared\n");
+    return 0;
+}
+
+int network_credentials_exist(void) {
+    const wifi_credentials_t *creds = (const wifi_credentials_t *)(XIP_BASE + WIFI_CREDENTIALS_OFFSET);
+    
+    return (creds->magic == WIFI_CREDENTIALS_MAGIC && creds->version == WIFI_CREDENTIALS_VERSION);
 }

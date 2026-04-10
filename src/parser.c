@@ -716,6 +716,154 @@ static uint8_t fnWifiRssi(char *rest, void *v) {
 }
 
 /**
+ * Token function for the "wifiSet" command
+ * Saves WiFi credentials to flash for auto-connect on startup
+ * Usage: wifiSet SSID password
+ */
+static uint8_t fnWifiSet(char *rest, void *v) {
+    (void)v;
+    
+    /* Parse SSID and password */
+    char ssid[33] = {0};
+    char password[64] = {0};
+    
+    /* Skip leading whitespace */
+    while (*rest && isspace(*rest)) rest++;
+    
+    /* Extract SSID (first token) */
+    int i = 0;
+    while (i < 32 && *rest && !isspace(*rest)) {
+        ssid[i++] = *rest++;
+    }
+    ssid[i] = '\0';
+    
+    if (i == 0) {
+        printf("Error: Missing SSID. Usage: wifiSet SSID password\n");
+        return 1;
+    }
+    
+    /* Skip whitespace between SSID and password */
+    while (*rest && isspace(*rest)) rest++;
+    
+    /* Extract password (rest of line) */
+    i = 0;
+    while (i < 63 && *rest && *rest != '\r' && *rest != '\n') {
+        password[i++] = *rest++;
+    }
+    password[i] = '\0';
+    
+    if (i == 0) {
+        printf("Error: Missing password. Usage: wifiSet SSID password\n");
+        return 1;
+    }
+    
+    /* Save to flash */
+    printf("Saving WiFi credentials to flash: SSID='%s'\n", ssid);
+    int result = network_credentials_save(ssid, password);
+    
+    if (result == 0) {
+        printf("WiFi credentials saved successfully. They will auto-connect on next boot.\n");
+    } else {
+        printf("Failed to save credentials (error: %d)\n", result);
+    }
+    
+    return (result == 0) ? 0 : 1;
+}
+
+/**
+ * Token function for the "wifiGet" command
+ * Shows if WiFi credentials are saved in flash
+ */
+static uint8_t fnWifiGet(char *rest, void *v) {
+    (void)rest;
+    (void)v;
+    
+    if (network_credentials_exist()) {
+        char ssid[33];
+        char password[64];
+        if (network_credentials_load(ssid, password)) {
+            printf("Saved WiFi Credentials:\n");
+            printf("  SSID: %s\n", ssid);
+            printf("  Password: [hidden]\n");
+        } else {
+            printf("Credentials exist but are corrupted\n");
+        }
+    } else {
+        printf("No WiFi credentials saved in flash\n");
+    }
+    
+    return 0;
+}
+
+/**
+ * Token function for the "wifiClear" command
+ * Clears saved WiFi credentials from flash
+ */
+static uint8_t fnWifiClear(char *rest, void *v) {
+    (void)rest;
+    (void)v;
+    
+    printf("Clearing saved WiFi credentials...\n");
+    int result = network_credentials_clear();
+    
+    if (result == 0) {
+        printf("WiFi credentials cleared. Device will not auto-connect on next boot.\n");
+    } else {
+        printf("Failed to clear credentials (error: %d)\n", result);
+    }
+    
+    return (result == 0) ? 0 : 1;
+}
+
+/**
+ * Token function for the "ifconfig" command
+ * Shows network interface configuration including IP address
+ * 
+ * @param rest Remainder of the command string (unused)
+ * @param v Void pointer for context (unused)
+ * @return 0 on success, non-zero on failure
+ */
+static uint8_t fnIfconfig(char *rest, void *v) {
+    (void)rest;
+    (void)v;
+    
+    char ip_str[32];
+    int status = network_is_connected();
+    
+    printf("\n=== Network Configuration ===\n");
+    printf("WiFi Status: %s\n", status == 1 ? "CONNECTED" : (status == 0 ? "NOT CONNECTED" : "ERROR"));
+    
+    network_get_ip_address(ip_str, sizeof(ip_str));
+    printf("IP Address: %s\n", ip_str);
+    
+    int rssi = network_get_rssi();
+    if (rssi == -999) {
+        printf("Signal Strength: NOT AVAILABLE\n");
+    } else {
+        printf("Signal Strength (RSSI): %d dBm\n", rssi);
+    }
+    
+    printf("==============================\n\n");
+    return 0;
+}
+
+/**
+ * Token function for the "netifStatus" command
+ * Shows detailed network interface diagnostics
+ * 
+ * @param rest Remainder of the command string (unused)
+ * @param v Void pointer for context (unused)
+ * @return 0 on success, non-zero on failure
+ */
+static uint8_t fnNetifStatus(char *rest, void *v) {
+    (void)rest;
+    (void)v;
+    
+    network_print_netif_status();
+    return 0;
+}
+
+/**
  * Token function for the "rtosStatus" command
  * Displays stack usage information for all running FreeRTOS tasks
  * 
@@ -841,6 +989,34 @@ static uint8_t fnUdpStop(char *rest, void *v) {
     
     udp_server_stop();
     printf("UDP Server: Stopped\n");
+    return 0;
+}
+
+/**
+ * Token function for the "udpStatus" command
+ * Shows UDP server status and diagnostics
+ */
+static uint8_t fnUdpStatus(char *rest, void *v) {
+    (void)rest;
+    (void)v;
+    
+    printf("UDP Server Status:\n");
+    printf("  - Running: %s\n", udp_server_is_running() ? "YES" : "NO");
+    printf("  - Port: 5001\n");
+    printf("  - To start: type 'udpStart'\n");
+    printf("  - To stop:  type 'udpStop'\n");
+    return 0;
+}
+
+/**
+ * Token function for the "udpDiag" command
+ * Shows detailed UDP server diagnostics
+ */
+static uint8_t fnUdpDiag(char *rest, void *v) {
+    (void)rest;
+    (void)v;
+    
+    udp_server_print_diagnostics();
     return 0;
 }
 
@@ -995,10 +1171,17 @@ static const struct s_tokens aTokens[] = {
     {"wifiList",    "List WiFi scan results",               fnWifiList},
     {"wifiConnect", "Connect to WiFi (usage: wifiConnect SSID pass)", fnWifiConnect},
     {"wifiStatus",  "Check WiFi connection status",         fnWifiStatus},
+    {"wifiSet",     "Save WiFi credentials to flash (usage: wifiSet SSID pass)", fnWifiSet},
+    {"wifiGet",     "Show saved WiFi credentials",          fnWifiGet},
+    {"wifiClear",   "Clear saved WiFi credentials from flash",  fnWifiClear},
     {"wifiRssi",    "Get current WiFi signal strength (dBm)",  fnWifiRssi},
+    {"ifconfig",    "Show network interface configuration",  fnIfconfig},
+    {"netifStatus", "Show detailed network interface diagnostics",  fnNetifStatus},
     {"rtosStatus",  "Display FreeRTOS task stack usage",    fnRtosStatus},
     {"udpStart",      "Start UDP server (audio on port 5001)",  fnUdpStart},
     {"udpStop",       "Stop UDP server",                      fnUdpStop},
+    {"udpStatus",     "Show UDP server status",               fnUdpStatus},
+    {"udpDiag",       "Show UDP diagnostics (packets, clients)",  fnUdpDiag},
     {"enableWaterfall","Enable waterfall display",           fnEnableWaterfall},
     {"disableWaterfall","Disable waterfall display",         fnDisableWaterfall},
     {"waterfallMode", "Get/set waterfall mode (0=OFF, 1=TEST, 2=LIVE_AUDIO)", fnWaterfallMode},

@@ -31,6 +31,12 @@ void udp_audio_task(void *parameters);
 int udp_server_is_running(void);
 
 /**
+ * Print UDP server diagnostics
+ * Shows connected clients, packets received, and audio transmission stats
+ */
+void udp_server_print_diagnostics(void);
+
+/**
  * Write audio frame to shared buffer and signal all connected clients
  * Called from microphone ISR context
  * Returns number of samples written (may be less if buffer full)

@@ -323,6 +323,19 @@ int main(void)
     }
     printf("Spectrogram initialized successfully\n");
 
+    /* Initialize waterfall display on startup (independent of WiFi) */
+    printf("Initializing waterfall display in LIVE_AUDIO mode...\n");
+    fflush(stdout);
+    if (xSemaphoreTake(g_LvglMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+        waterfall_mode_init();
+        waterfall_set_mode(WATERFALL_MODE_LIVE_AUDIO);
+        printf("Waterfall display initialized and ready (mode=LIVE_AUDIO)\n");
+        xSemaphoreGive(g_LvglMutex);
+    } else {
+        printf("WARNING: Could not acquire display mutex for waterfall init\n");
+    }
+    fflush(stdout);
+
     /* Pre-create separate audio queues BEFORE tasks start to avoid race conditions */
     /* Two independent queues - each task has its own for independent flow control */
     printf("Initializing audio queues...\n");

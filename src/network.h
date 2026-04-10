@@ -73,10 +73,52 @@ int network_is_connected(void);
 int network_get_rssi(void);
 
 /**
+ * Get current IP address assigned by DHCP
+ * @param ip_str Buffer to store IP address string (recommend at least 16 bytes)
+ * @param len Length of ip_str buffer
+ * @return 1 if valid IP assigned, 0 if not connected or no IP yet
+ */
+int network_get_ip_address(char *ip_str, int len);
+
+/**
+ * Print detailed network interface diagnostics
+ * Shows netif flags, RX/TX stats, link status, etc.
+ */
+void network_print_netif_status(void);
+
+/**
  * WiFi network task - call periodically to process WiFi events
  * @param parameters Unused FreeRTOS parameter
  */
 void network_task(void *parameters);
+
+/**
+ * Save WiFi credentials to flash (persistent storage)
+ * @param ssid WiFi network name (max 32 chars)
+ * @param password WiFi password (max 63 chars)
+ * @return 0 on success, non-zero on error
+ */
+int network_credentials_save(const char *ssid, const char *password);
+
+/**
+ * Load WiFi credentials from flash
+ * @param ssid Buffer to fill with SSID (must be at least 33 bytes)
+ * @param password Buffer to fill with password (must be at least 64 bytes)
+ * @return 1 if credentials found, 0 if not found/invalid
+ */
+int network_credentials_load(char *ssid, char *password);
+
+/**
+ * Clear saved WiFi credentials from flash
+ * @return 0 on success, non-zero on error
+ */
+int network_credentials_clear(void);
+
+/**
+ * Check if WiFi credentials are saved
+ * @return 1 if valid credentials exist, 0 otherwise
+ */
+int network_credentials_exist(void);
 
 #ifdef __cplusplus
 }

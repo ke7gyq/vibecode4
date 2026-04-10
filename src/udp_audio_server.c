@@ -51,6 +51,7 @@ static uint32_t g_udp_last_sequence = 0;      /* Last sequence number received *
 static uint32_t g_udp_frame_count = 0;        /* Frames processed this session */
 static uint32_t g_udp_frames_skipped = 0;     /* Frames skipped due to backpressure */
 static uint32_t g_udp_last_report_time = 0;   /* Last stats report time */
+static uint32_t g_udp_packets_received = 0;   /* Track incoming registration packets */
 
 /* Send audio frame to all active clients via UDP
  * Zero-copy implementation: uses PBUF_REF to point directly to audio buffer
@@ -139,16 +140,21 @@ static void udp_audio_send_frame(int16_t *buffer) {
 // UDP receive callback - track client address when they send first packet
 static void udp_recv_callback(void *arg, struct udp_pcb *pcb, struct pbuf *p, 
                               const ip_addr_t *addr, uint16_t port) {
-    printf("[UDP_RECV_CB] CALLBACK INVOKED from ");
+    g_udp_packets_received++;  /* Count this incoming packet */
+    
+    printf("[UDP_RECV_CB] ==== CALLBACK INVOKED (%lu packets so far) from ", g_udp_packets_received);
     ip_addr_debug_print(LWIP_DBG_ON, addr);
-    printf(" port %u\n", port);
+    printf(" port %u ====\n", port);
+    fflush(stdout);
     
     if (p == NULL) {
         printf("[UDP_RECV_CB] NULL pbuf, returning\n");
+        fflush(stdout);
         return;
     }
     
     printf("[UDP_RECV_CB] Packet received: %u bytes\n", p->tot_len);
+    fflush(stdout);
     
     // Register this client if we have space
     int found = -1;
@@ -421,3 +427,38 @@ void udp_server_stop(void) {
 int udp_server_is_running(void) {
     return g_server_running;
 }
+
+/**
+ * Print UDP server diagnostics
+ */
+void udp_server_print_diagnostics(void) {
+    printf("\n========== UDP Server Diagnostics ==========\n");
+    printf("Server Status: %s\n", g_server_running ? "RUNNING" : "STOPPED");
+    printf("Port: %d\n", UDP_AUDIO_PORT);
+    printf("PCB: %p\n", (void*)audio_pcb);
+    printf("\nIncoming Packets:\n");
+    printf("  - Total received: %lu\n", g_udp_packets_received);
+    
+    printf("\nRegistered Clients:\n");
+    int active_count = 0;
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (g_udp_clients[i].active) {
+            active_count++;
+            printf("  [%d] ", i);
+            ip_addr_debug_print(LWIP_DBG_ON, &g_udp_clients[i].addr);
+            printf(" port %u (samples sent: %lu)\n", g_udp_clients[i].port, g_udp_clients[i].samples_sent);
+        }
+    }
+    if (active_count == 0) {
+        printf("  (none connected)\n");
+    }
+    
+    printf("\nAudio Transmission:\n");
+    printf("  - Frames sent: %lu\n", g_udp_frame_count);
+    printf("  - Send attempts: %lu\n", g_audio_frames_sent_attempts);
+    printf("  - Send errors: %lu\n", g_audio_sendto_errors);
+    
+    printf("==========================================\n\n");
+    fflush(stdout);
+}
+
