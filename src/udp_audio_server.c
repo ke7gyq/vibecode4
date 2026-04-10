@@ -9,6 +9,7 @@
 #include "task.h"
 #include "tcp_server.h"  // Interface header (kept for backward compatibility)
 #include "microphone.h"
+#include "audio_hub.h"
 #include "network.h"
 
 #define UDP_AUDIO_PORT 5001
@@ -198,18 +199,15 @@ void udp_audio_task(void *parameters) {
     
     while (1) {
         take_count++;
-        /* Event-driven: block forever until microphone sends audio buffer message */
-        /* Returns only when xQueueSend() is called by microphone task */
-        BaseType_t queue_result = xQueueReceive(g_audioQueueUDP, &msg, portMAX_DELAY);
-        
-        if (queue_result != pdTRUE) {
+        /* Event-driven: block forever until audio hub broadcasts new buffer */
+        if (audio_hub_receive(&msg, portMAX_DELAY) != 0) {
             if (g_micDebug >= 1) {
-                printf("[UDP] ERROR: xQueueReceive failed\n");
+                printf("[UDP] ERROR: audio_hub_receive failed\n");
             }
             continue;
         }
         
-        /* Message received - extract buffer info from queue message */
+        /* Message received - extract buffer info from audio message */
         int16_t *buffer_ptr = msg.buffer_ptr;
         uint32_t sample_count = msg.sample_count;
         uint32_t sequence = msg.sequence;

@@ -20,6 +20,7 @@
 #include "waterfall.h"
 #endif
 #include "spectrogram.h"
+#include "audio_hub.h"
 
 
 
@@ -323,20 +324,12 @@ int main(void)
     }
     printf("Spectrogram initialized successfully\n");
 
-    /* Create audio queues BEFORE starting tasks (waterfall_task needs these) */
-    g_audioQueueWaterfall = xQueueCreate(4, sizeof(AudioBufferMessage_t));
-    if (g_audioQueueWaterfall == NULL) {
-        printf("ERROR: Failed to create waterfall audio queue\n");
+    /* Initialize audio hub for broadcast to all consumers */
+    if (audio_hub_init() != 0) {
+        printf("ERROR: Failed to initialize audio hub\n");
         return 1;
     }
-    printf("Waterfall audio queue created\n");
-
-    g_audioQueueUDP = xQueueCreate(4, sizeof(AudioBufferMessage_t));
-    if (g_audioQueueUDP == NULL) {
-        printf("ERROR: Failed to create UDP audio queue\n");
-        return 1;
-    }
-    printf("UDP audio queue created\n");
+    printf("Audio hub initialized (broadcast pattern)\n");
 
 #if 0
     // Timer task - LVGL display management (SPI I/O heavy)

@@ -13,6 +13,7 @@
 #include "waterfall.h"
 #include "spectrogram.h"
 #include "microphone.h"
+#include "audio_hub.h"
 #include "FreeRTOS.h"
 #include "task.h"
 #include "semphr.h"
@@ -202,13 +203,11 @@ void waterfall_task(void *parameters) {
     uint32_t last_report = 0;
     
     while (1) {
-        /* Wait forever for audio buffer message */
+        /* Wait forever for audio buffer broadcast */
         AudioBufferMessage_t msg;
         
-        BaseType_t result = xQueueReceive(g_audioQueueWaterfall, &msg, portMAX_DELAY);
-        
-        if (result != pdTRUE) {
-            printf("[Waterfall] Queue receive failed\n");
+        if (audio_hub_receive(&msg, portMAX_DELAY) != 0) {
+            printf("[Waterfall] Audio hub receive failed\n");
             continue;
         }
         

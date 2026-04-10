@@ -3,6 +3,7 @@
 #include "OpenPDMFilter.h"
 #include "tcp_server.h"
 #include "waterfall.h"
+#include "audio_hub.h"
 #include "pico/stdlib.h"
 #include "hardware/gpio.h"
 #include "hardware/pio.h"
@@ -496,36 +497,12 @@ void microphone_task(void *parameters)
                     .timestamp_ms = to_ms_since_boot(get_absolute_time())
                 };
                 
-                /* Queue to UDP task (using xQueueSend - task context, not ISR) */
-                /* CRITICAL: Only send if UDP server is actually running */
-                if (g_audioQueueUDP != NULL && udp_server_is_running()) {
-                    /* Use 5ms timeout to yield CPU if queue is full, allowing consumers to drain */
-                    if (xQueueSend(g_audioQueueUDP, &msg, pdMS_TO_TICKS(5)) == errQUEUE_FULL) {
-                        if (g_micDebug >= 5) {
-                            printf("[Mic] WARNING: UDP queue FULL (seq=%lu dropped)\n", msg.sequence);
-                        }
-                    } else if (g_micDebug >= 6) {
-                        printf("[Mic] UDP← seq=%lu buf=%u %u.%u ms\n",
-                               msg.sequence, msg.buffer_id, msg.timestamp_ms/1000, msg.timestamp_ms%1000);
-                    }
+                /* Broadcast audio to all consumers (UDP, Waterfall, etc.) */
+                if (audio_hub_broadcast(&msg) != 0) {
+                    printf("[Mic] ERROR: Failed to broadcast audio (seq=%lu)\n", msg.sequence);
                 }
                 
-                /* Queue for Waterfall task (using xQueueSend - task context, not ISR) */
-                if (g_audioQueueWaterfall != NULL) {
-                    /* Use 5ms timeout to yield CPU if queue is full, allowing consumers to drain */
-                    BaseType_t send_result = xQueueSend(g_audioQueueWaterfall, &msg, pdMS_TO_TICKS(5));
-                    if (send_result == errQUEUE_FULL) {
-                        printf("[Mic] ERROR: Waterfall queue FULL (seq=%lu dropped)\n", msg.sequence);
-                    } else if (send_result == pdTRUE) {
-                        /* Message sent successfully - silent */ 
-                    } else {
-                        printf("[Mic] ERROR: xQueueSend failed with code %d\n", send_result);
-                    }
-                } else {
-                    printf("[Mic] ERROR: g_audioQueueWaterfall is NULL!\n");
-                }
-                
-                /* Legacy semaphore signal (using xSemaphoreGive - task context, not ISR) */
+                /* Legacy semaphore signal for backward compatibility */
                 if (g_audioReadySemaphore != NULL) {
                     xSemaphoreGive(g_audioReadySemaphore);
                 }
@@ -612,35 +589,14 @@ bool microphone_init(void)
     
     printf("[Mic] Initializing audio signaling system...\n");
     
-    /* Create message queue for UDP task (decoupled queue-based signaling) */
-    /* Skip if already created by main (early initialization) */
-    if (g_audioQueueUDP == NULL) {
-        g_audioQueueUDP = xQueueCreate(4, sizeof(AudioBufferMessage_t));
-        if (g_audioQueueUDP == NULL) {
-            printf("ERROR: Failed to create UDP audio queue\n");
-            return false;
-        }
-        printf("[Mic] UDP audio queue created (depth=4, msg_size=%u bytes)\n",
-               (unsigned int)sizeof(AudioBufferMessage_t));
-    } else {
-        printf("[Mic] UDP audio queue already initialized (by main)\n");
+    /* Initialize audio hub for broadcast to all consumers */
+    /* Skip if already initialized by main */
+    if (audio_hub_init() != 0) {
+        printf("Note: Audio hub already initialized by main\n");
     }
+    printf("[Mic] Audio hub ready for broadcast\n");
     
-    /* Create message queue for Waterfall task */
-    /* Skip if already created by main (early initialization) */
-    if (g_audioQueueWaterfall == NULL) {
-        g_audioQueueWaterfall = xQueueCreate(4, sizeof(AudioBufferMessage_t));
-        if (g_audioQueueWaterfall == NULL) {
-            printf("ERROR: Failed to create Waterfall audio queue\n");
-            return false;
-        }
-        printf("[Mic] Waterfall audio queue created (depth=4, msg_size=%u bytes)\n",
-               (unsigned int)sizeof(AudioBufferMessage_t));
-    } else {
-        printf("[Mic] Waterfall audio queue already initialized (by main)\n");
-    }
-    
-    /* Legacy semaphore - kept for compatibility, but not used by new queue system */
+    /* Legacy semaphore - kept for compatibility */
     g_audioReadySemaphore = xSemaphoreCreateBinary();
     if (g_audioReadySemaphore == NULL) {
         printf("ERROR: Failed to create audio ready semaphore\n");
