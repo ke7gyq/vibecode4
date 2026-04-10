@@ -10,11 +10,14 @@
 
 #include <stdint.h>
 #include <arm_math.h>
+#include "generated/config_constants.h"  /* Get SPECTROGRAM_SAMPLE_RATE from configuration.json */
 
 /* ============== FFT Configuration ============== */
 
-/* Sample rate (must match microphone audio rate) */
-#define SPECTROGRAM_SAMPLE_RATE    16000   /* Hz */
+/* Sample rate (use value from generated config, fallback to 16000 if not defined) */
+#ifndef SPECTROGRAM_SAMPLE_RATE
+#define SPECTROGRAM_SAMPLE_RATE    16000   /* Hz - fallback default */
+#endif
 
 /* FFT size (must be power of 2) */
 #define SPECTROGRAM_FFT_SIZE       256     /* Must be 128, 256, 512, 1024, etc. */
