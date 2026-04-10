@@ -26,6 +26,7 @@ typedef struct {
     int active;
     uint32_t samples_sent;
     uint32_t last_stats_time;
+    uint32_t last_activity_time;  /* Track last HELLO packet for timeout detection */
 } udp_client_t;
 
 static udp_client_t g_udp_clients[MAX_CLIENTS];
@@ -37,6 +38,10 @@ static TaskHandle_t g_udp_audio_task_handle = NULL;  /* UDP audio task handle */
 
 /* Current buffer being transmitted */
 static uint8_t g_current_buffer_being_sent = 0;      /* Which buffer we're sending (1 or 2) */
+
+/* Static buffer for UDP packets - memcpy here to avoid double-buffer reuse conflicts */
+/* This ensures pbuf_rom points to stable data throughout transmission */
+static int16_t g_udp_send_buffer[AUDIO_BUFFER_SIZE];  /* Static copy for transmission */
 
 /* Stats tracking */
 static uint32_t g_audio_frames_sent = 0;
@@ -54,14 +59,31 @@ static uint32_t g_udp_last_report_time = 0;   /* Last stats report time */
 static uint32_t g_udp_packets_received = 0;   /* Track incoming registration packets */
 
 /* Send audio frame to all active clients via UDP
- * Zero-copy implementation: uses PBUF_REF to point directly to audio buffer
- * Safe because double-buffering ensures buffer isn't modified while sending
+ * Uses PBUF_POOL with memcpy - allocate per-frame but from static pool
  */
 static void udp_audio_send_frame(int16_t *buffer) {
     if (buffer == NULL) {
         g_audio_samples_dropped += AUDIO_BUFFER_SIZE;
         return;
     }
+    
+    /* Copy audio data to static buffer */
+    uint32_t frame_bytes = AUDIO_BUFFER_SIZE * sizeof(int16_t);
+    memcpy(g_udp_send_buffer, buffer, frame_bytes);
+    
+    /* Create pbuf from static pool, copy data into it */
+    struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, frame_bytes, PBUF_POOL);
+    if (p == NULL) {
+        /* Out of memory - skip this frame */
+        g_audio_samples_dropped += AUDIO_BUFFER_SIZE;
+        if (g_micDebug >= 2) {
+            printf("[UDP] ERROR: pbuf_alloc FAILED\n");
+        }
+        return;
+    }
+    
+    /* Copy to pbuf payload (pbuf_pool can be freed safely) */
+    memcpy(p->payload, g_udp_send_buffer, frame_bytes);
     
     /* Send to all active UDP clients */
     for (int i = 0; i < MAX_CLIENTS; i++) {
@@ -75,22 +97,7 @@ static void udp_audio_send_frame(int16_t *buffer) {
             printf("[UDP] Sending %d samples to client %d\n", AUDIO_BUFFER_SIZE, i);
         }
         
-        /* Create pbuf that references existing buffer (zero-copy) */
-        uint32_t frame_bytes = AUDIO_BUFFER_SIZE * sizeof(int16_t);
-        struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, frame_bytes, PBUF_REF);
-        if (p == NULL) {
-            /* Out of memory - skip this frame */
-            g_audio_samples_dropped += AUDIO_BUFFER_SIZE;
-            if (g_micDebug >= 2) {
-                printf("[UDP] ERROR: pbuf_alloc FAILED for client %d\n", i);
-            }
-            continue;
-        }
-        
-        /* Point directly to existing buffer - NO memcpy */
-        p->payload = (void *)buffer;
-        
-        /* Send UDP packet to client */
+        /* Send UDP packet to client (pbuf gets cloned/queued by lwIP) */
         uint32_t send_start = to_ms_since_boot(get_absolute_time());
         err_t err = udp_sendto(audio_pcb, p, &client->addr, client->port);
         uint32_t send_time = to_ms_since_boot(get_absolute_time()) - send_start;
@@ -100,9 +107,6 @@ static void udp_audio_send_frame(int16_t *buffer) {
         if (send_time > 5 && g_micDebug >= 3) {
             printf("[UDP_SEND] WARNING: send took %lu ms for client %d (buffer pressure?)\n", send_time, i);
         }
-        
-        /* Free pbuf header (buffer remains valid - it's persistent audio data) */
-        pbuf_free(p);
         
         if (err != ERR_OK) {
             g_audio_samples_dropped += AUDIO_BUFFER_SIZE;
@@ -117,6 +121,9 @@ static void udp_audio_send_frame(int16_t *buffer) {
         client->samples_sent += AUDIO_BUFFER_SIZE;
         g_audio_samples_sent += AUDIO_BUFFER_SIZE;
     }
+    
+    /* Free pbuf after all sends (lwIP clones internally) */
+    pbuf_free(p);
     
     g_audio_frames_sent++;
     
@@ -156,7 +163,18 @@ static void udp_recv_callback(void *arg, struct udp_pcb *pcb, struct pbuf *p,
     printf("[UDP_RECV_CB] Packet received: %u bytes\n", p->tot_len);
     fflush(stdout);
     
-    // Register this client if we have space
+    uint32_t now = to_ms_since_boot(get_absolute_time());
+    
+    /* Detect HELLO registration packet (5 bytes: "HELLO") */
+    int is_hello = (p->tot_len == 5 && 
+                   p->payload != NULL &&
+                   strncmp((const char*)p->payload, "HELLO", 5) == 0);
+    
+    if (is_hello) {
+        printf("[UDP_RECV_CB] HELLO packet detected - registration attempt\n");
+    }
+    
+    /* Check if this client is already registered */
     int found = -1;
     for (int i = 0; i < MAX_CLIENTS; i++) {
         if (g_udp_clients[i].active && 
@@ -164,7 +182,21 @@ static void udp_recv_callback(void *arg, struct udp_pcb *pcb, struct pbuf *p,
             g_udp_clients[i].port == port) {
             found = i;
             printf("[UDP_RECV_CB] Client already registered at index %d\n", i);
+            g_udp_clients[i].last_activity_time = now;  /* Update activity time */
             break;
+        }
+    }
+    
+    /* Clean up stale clients ONLY on new HELLO registration attempts */
+    if (is_hello && found == -1) {
+        printf("[UDP_RECV_CB] NEW CLIENT - cleaning up stale clients\n");
+        for (int i = 0; i < MAX_CLIENTS; i++) {
+            if (g_udp_clients[i].active && 
+                (now - g_udp_clients[i].last_activity_time) > 10000) {
+                printf("[UDP_RECV_CB] STALE CLIENT at slot %d (inactive %lu ms) - marking inactive\n", 
+                       i, now - g_udp_clients[i].last_activity_time);
+                g_udp_clients[i].active = 0;
+            }
         }
     }
     
@@ -177,11 +209,13 @@ static void udp_recv_callback(void *arg, struct udp_pcb *pcb, struct pbuf *p,
                 g_udp_clients[i].active = 1;
                 g_udp_clients[i].samples_sent = 0;
                 g_udp_clients[i].last_stats_time = to_ms_since_boot(get_absolute_time());
+                g_udp_clients[i].last_activity_time = now;  /* Track activity time */
                 printf("[UDP_RECV_CB] NEW CLIENT registered at index %d: ", i);
                 ip_addr_debug_print(LWIP_DBG_ON, addr);
                 printf(" port %u\n", port);
                 
                 /* CRITICAL DEBUG: Verify client was actually set */
+
                 if (g_micDebug >= 4) {
                     printf("[UDP_RECV_CB] VERIFY: clients[%d].active=%u, port=%u\n", i, g_udp_clients[i].active, g_udp_clients[i].port);
                 }

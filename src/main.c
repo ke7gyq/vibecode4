@@ -329,7 +329,7 @@ int main(void)
     if (xSemaphoreTake(g_LvglMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
         waterfall_mode_init();
         waterfall_set_mode(WATERFALL_MODE_LIVE_AUDIO);
-        printf("Waterfall display initialized and ready (mode=LIVE_AUDIO)\n");
+        printf("Waterfall display initialized and ready (LIVE_AUDIO)\n");
         xSemaphoreGive(g_LvglMutex);
     } else {
         printf("WARNING: Could not acquire display mutex for waterfall init\n");
@@ -485,15 +485,16 @@ int main(void)
     waterfall_set_spectrogram(&g_spectrogram);
 #endif  // #ifdef(0) - Waterfall disabled
 
-    /* Create Waterfall Task (Core 1 - isolated display rendering) */
-    const UBaseType_t core_1_waterfall = (1 << 1);  /* Core 1 only */
+    /* Create Waterfall Task (Core 0) */
+    #if(1)  /* Waterfall enabled for testing */
+    const UBaseType_t core_0_waterfall = (1 << 0);  /* Core 0 only */
     result = xTaskCreateAffinitySet(
         waterfall_task,       // Task function
         "WaterfallTask",      // Task name
-        8192,                 // Stack size in words (FFT + signal processing + printf buffers)
+        2048,                 // Stack size in words (8KB - reasonable for display task)
         NULL,                 // Parameters
         2,                    // Priority: medium (below microphone, same as display)
-        core_1_waterfall,     // Core affinity: Core 1
+        core_0_waterfall,     // Core affinity: Core 0
         NULL                  // Task handle (not needed)
     );
     if (result != pdPASS) {
@@ -501,16 +502,17 @@ int main(void)
         return 1;
     }
     printf("Waterfall task created on Core 1\n");
+    #endif  /* Waterfall enabled for testing */
 
-    /* Create Timer update task on Core 1 (isolated from audio) */
-    const UBaseType_t core_1_affinity = (1 << 1);  /* Core 1 only */
+    /* Create Timer update task on Core 0 */
+    const UBaseType_t core_0_affinity_timer = (1 << 0);  /* Core 0 only */
     result = xTaskCreateAffinitySet(
         timer_update_task,    // Task function
         "TimerUpdateTask",    // Task name
         512,                  // Stack size in words (2KB - small, simple task)
         NULL,                 // Parameters
         2,                    // Priority: medium-high (match waterfall task)
-        core_1_affinity,      // Core affinity: Core 1
+        core_0_affinity_timer,// Core affinity: Core 0
         NULL                  // Task handle (not needed)
     );
     if (result != pdPASS) {

@@ -246,9 +246,9 @@ int spectrogram_compute_waterfall_bins_with_gain(const spectrogram_t *spec, uint
 #define WATERFALL_ACCM_FRAMES 9
 #endif
 
-/** Number of frequency bins from FFT output (512 complex pairs -> 512 magnitude outputs) */
+/** Number of frequency bins from FFT output (256-point real FFT -> 128 magnitude outputs) */
 #ifndef WATERFALL_FFT_BINS
-#define WATERFALL_FFT_BINS 512
+#define WATERFALL_FFT_BINS 128
 #endif
 
 /**
