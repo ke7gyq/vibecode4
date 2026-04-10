@@ -20,7 +20,6 @@
 #include "waterfall.h"
 #endif
 #include "spectrogram.h"
-#include "audio_hub.h"
 
 
 
@@ -324,12 +323,36 @@ int main(void)
     }
     printf("Spectrogram initialized successfully\n");
 
-    /* Initialize audio hub for broadcast to all consumers */
-    if (audio_hub_init() != 0) {
-        printf("ERROR: Failed to initialize audio hub\n");
+    /* Pre-create separate audio queues BEFORE tasks start to avoid race conditions */
+    /* Two independent queues - each task has its own for independent flow control */
+    printf("Initializing audio queues...\n");
+    
+    g_audioQueueUDP = xQueueCreate(4, sizeof(AudioBufferMessage_t));
+    if (g_audioQueueUDP == NULL) {
+        printf("ERROR: Failed to create UDP audio queue\n");
         return 1;
     }
-    printf("Audio hub initialized (broadcast pattern)\n");
+    printf("UDP audio queue created (depth=4, msg_size=%u bytes)\n",
+           (unsigned)sizeof(AudioBufferMessage_t));
+    
+    g_audioQueueWaterfall = xQueueCreate(4, sizeof(AudioBufferMessage_t));
+    if (g_audioQueueWaterfall == NULL) {
+        printf("ERROR: Failed to create Waterfall audio queue\n");
+        return 1;
+    }
+    printf("Waterfall audio queue created (depth=4, msg_size=%u bytes)\n",
+           (unsigned)sizeof(AudioBufferMessage_t));
+    printf("  - Independent queues: UDP and Waterfall each drain at own rate\n");
+
+    /* Pre-create audio ready semaphore BEFORE tasks start (microphone_init will skip if exists) */
+    /* Used by audio_dsp_example.c and potentially other consumers */
+    printf("Initializing audio ready semaphore...\n");
+    g_audioReadySemaphore = xSemaphoreCreateBinary();
+    if (g_audioReadySemaphore == NULL) {
+        printf("ERROR: Failed to create audio ready semaphore\n");
+        return 1;
+    }
+    printf("Audio ready semaphore created (binary, legacy compatibility)\n");
 
 #if 0
     // Timer task - LVGL display management (SPI I/O heavy)
@@ -480,15 +503,6 @@ int main(void)
     if (result != pdPASS) {
         printf("Failed to create timer update task\n");
         return 1;
-    }
-
-    /* Auto-start UDP server before scheduler to prevent race condition */
-    /* (Eliminates timing window where client connects before server is ready) */
-    printf("Starting UDP audio server...\n");
-    if (udp_server_start() == 0) {
-        printf("UDP server auto-started successfully\n");
-    } else {
-        printf("WARNING: UDP server failed to start (will be unavailable)\n");
     }
     
     printf("Starting FreeRTOS scheduler...\n");

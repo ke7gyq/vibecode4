@@ -119,7 +119,6 @@ set(SOURCES
     src/waterfall.c
     src/spectrogram.c
     src/microphone.c
-    src/audio_hub.c
     src/audio_dsp_example.c
     src/OpenPDMFilter.c
     src/network.c

@@ -29,7 +29,9 @@
 #define SPECTROGRAM_NUM_BINS       16
 
 /* Frequency resolution after binning */
+#ifndef SPECTROGRAM_BIN_SIZE
 #define SPECTROGRAM_BIN_SIZE       (SPECTROGRAM_FFT_SIZE / 2 / SPECTROGRAM_NUM_BINS)
+#endif
 
 /* Skip low frequency bins (DC and very low freq) */
 #define SPECTROGRAM_BINS_SKIP      5
@@ -56,7 +58,9 @@
 /* ============== Amplitude to Color Mapping ============== */
 
 /* Maximum magnitude value before saturation */
+#ifndef SPECTROGRAM_MAG_MAX
 #define SPECTROGRAM_MAG_MAX        2000.0f
+#endif
 
 /* ============== Data Types ============== */
 
@@ -238,10 +242,14 @@ int spectrogram_compute_waterfall_bins_with_gain(const spectrogram_t *spec, uint
 /* ============== Waterfall Frame Accumulation (New Algorithm) ============== */
 
 /** Number of FFT frames to accumulate before generating waterfall bar (configurable) */
+#ifndef WATERFALL_ACCM_FRAMES
 #define WATERFALL_ACCM_FRAMES 9
+#endif
 
 /** Number of frequency bins from FFT output (512 complex pairs -> 512 magnitude outputs) */
+#ifndef WATERFALL_FFT_BINS
 #define WATERFALL_FFT_BINS 512
+#endif
 
 /**
  * Waterfall accumulation context

@@ -797,7 +797,6 @@ static uint8_t fnRtosStatus(char *rest, void *v) {
     
     /* Display queue status */
     printf("=== Audio Queue Status ===\n");
-    printf("UDP Queue Depth:       %u/4\n", microphone_get_udp_queue_depth());
     printf("Waterfall Queue Depth: %u/4\n", waterfall_get_queue_depth());
     printf("\n");
     

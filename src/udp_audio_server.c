@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include <lwip/udp.h>
 #include <lwip/err.h>
 #include <pico/time.h>
@@ -9,7 +10,6 @@
 #include "task.h"
 #include "tcp_server.h"  // Interface header (kept for backward compatibility)
 #include "microphone.h"
-#include "audio_hub.h"
 #include "network.h"
 
 #define UDP_AUDIO_PORT 5001
@@ -195,28 +195,33 @@ void udp_audio_task(void *parameters) {
     g_udp_audio_task_handle = xTaskGetCurrentTaskHandle();
     uint32_t frame_count = 0;
     uint32_t take_count = 0;
-    AudioBufferMessage_t msg;
     
     while (1) {
+        AudioBufferMessage_t msg;
         take_count++;
-        /* Event-driven: block forever until audio hub broadcasts new buffer */
-        if (audio_hub_receive(&msg, portMAX_DELAY) != 0) {
+        
+        /* Queue-based: block until microphone sends next message */
+        /* FreeRTOS queue handles memory barriers internally */
+        BaseType_t queue_result = xQueueReceive(g_audioQueueUDP, &msg, portMAX_DELAY);
+        
+        if (queue_result != pdTRUE) {
             if (g_micDebug >= 1) {
-                printf("[UDP] ERROR: audio_hub_receive failed\n");
+                printf("[UDP] ERROR: xQueueReceive failed\n");
             }
             continue;
         }
         
-        /* Message received - extract buffer info from audio message */
-        int16_t *buffer_ptr = msg.buffer_ptr;
+        /* Extract buffer pointer from message */
+        int16_t *buffer_ptr = (msg.buffer_id == 1) ? 
+                              g_audioBuffers.buffer1 : g_audioBuffers.buffer2;
         uint32_t sample_count = msg.sample_count;
         uint32_t sequence = msg.sequence;
         
-        /* Validate buffer pointer */
-        if (buffer_ptr == NULL) {
+        if (buffer_ptr == NULL || sample_count == 0) {
             g_audio_samples_dropped += sample_count;
             if (g_micDebug >= 1) {
-                printf("[UDP] ERROR: NULL buffer pointer (seq=%lu)\n", sequence);
+                printf("[UDP] ERROR: Invalid buffer (ptr=%p, samples=%u, seq=%lu)\n",
+                       (void*)buffer_ptr, sample_count, sequence);
             }
             g_udp_frame_count++;
             continue;
@@ -339,20 +344,6 @@ int udp_server_start(void) {
     g_udp_frames_skipped = 0;       /* Reset skip counter */
     g_udp_last_report_time = 0;     /* Reset report timer */
     
-    /* IMPORTANT: Flush stale audio messages from previous run */
-    /* When udpStop/udpStart is called, the queue may contain old buffered messages */
-    /* Clear these out so UDP task starts fresh */
-    if (g_audioQueueUDP != NULL) {
-        AudioBufferMessage_t stale_msg;
-        while (xQueueReceive(g_audioQueueUDP, &stale_msg, 0) == pdTRUE) {
-            /* Drain queue without blocking */
-        }
-        printf("[DEBUG] UDP queue flushed (queue-based system)\n");
-    }
-    printf("[DIAGNOSTIC] Queue system ready (stale messages cleared)\n");
-    printf("[DIAGNOSTIC] Task state reset: last_seq=%lu, frame_count=%lu, skipped=%lu\n",
-           g_udp_last_sequence, g_udp_frame_count, g_udp_frames_skipped);
-    
     /* If PCB already exists from previous run, clean it up */
     if (audio_pcb != NULL) {
         printf("[DIAGNOSTIC] Old PCB exists, cleaning up...\n");
@@ -395,8 +386,7 @@ int udp_server_start(void) {
     
     /* DIAGNOSTIC: Log final state AFTER startup completes */
     printf("[DIAGNOSTIC] Startup state (AFTER):\n");
-    printf("  - Queue: ready (FreeRTOS queue-based)\n");
-    printf("  - UDP queue depth: %u/4\n", (unsigned)uxQueueMessagesWaiting(g_audioQueueUDP));
+    printf("  - Queue: ready (FreeRTOS semaphore-based)\n");
     printf("  - Active clients: 0 (none connected yet)\n");
     printf("  - Audio PCB: %p\n", (void*)audio_pcb);
     printf("  - Buffer being sent: %u\n", g_current_buffer_being_sent);

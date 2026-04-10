@@ -136,40 +136,37 @@ static void hanning_window_init_q15(q15_t *window, uint32_t size)
 
 /**
  * Convert Q15 magnitude to amplitude level (0-15)
- * Uses log-magnitude scaling for better perceptual representation
+ * Uses optimized integer-based log2 calculation (right-shift counting)
+ * 
+ * Squares the magnitude and counts right-shifts until value becomes zero.
+ * This efficiently approximates logarithmic scaling without floating-point math.
  */
 static uint8_t magnitude_to_amplitude_level(q15_t magnitude)
 {
-    /* Convert Q15 to floating point */
-    /* Q15: range is [0, 32767] representing [0, ~1] normalized */
-    float32_t mag_float = (float32_t)magnitude / 32767.0f;
+    /* Square the magnitude: mag_squared = magnitude * magnitude */
+    int32_t mag_i32 = (int32_t)magnitude;
+    uint64_t mag_squared = (uint64_t)mag_i32 * mag_i32;
     
-    /* Scale by magnitude max for proper range */
-    mag_float = mag_float * SPECTROGRAM_MAG_MAX;
+    /* Extract upper 16 bits where significant bits reside */
+    uint32_t resultant = (uint32_t)(mag_squared >> 16);
     
-    /* Use logarithmic scaling for perceptual effect */
-    /* Avoid log(0) - use small epsilon */
-    if (mag_float < 1.0f) {
-        mag_float = 1.0f;
+    /* If resultant is 0, return index 0 */
+    if (resultant == 0) {
+        return 0;
     }
     
-    float32_t log_mag = logf(mag_float);
+    /* Count right-shifts by 1 bit until resultant becomes 0 */
+    /* This computes floor(log2(resultant)) efficiently */
+    uint8_t index = 0;
+    do {
+        resultant >>= 1;
+        index++;
+        if (resultant == 0) {
+            break;
+        }
+    } while (index < 15);  /* Clamp to maximum colormap index */
     
-    /* Map to 0-15 amplitude level */
-    /* Empirically tuned range for good visualization */
-    float32_t min_log = logf(1.0f);        /* ~0 */
-    float32_t max_log = logf(SPECTROGRAM_MAG_MAX);  /* ~7.6 */
-    
-    float32_t normalized = (log_mag - min_log) / (max_log - min_log);
-    
-    /* Clamp to [0, 1] */
-    if (normalized < 0.0f) normalized = 0.0f;
-    if (normalized > 1.0f) normalized = 1.0f;
-    
-    /* Convert to 0-15 range */
-    uint8_t level = (uint8_t)(normalized * 15.0f + 0.5f);
-    
-    return (level > 15) ? 15 : level;
+    return index;
 }
 
 /* ============== Audio Downsampling (48 kHz → 6 kHz) ============== */
@@ -419,118 +416,14 @@ uint8_t spectrogram_get_bin(const spectrogram_t *spec, uint32_t bin_index)
     return spec->amplitude_bins[bin_index];
 }
 
-/**
- * Compute 24-bin waterfall colormap indices from FFT magnitude spectrum
+/* REMOVED: spectrogram_compute_waterfall_bins() and wrapper
  * 
- * Divides the 128 FFT magnitude values into 24 evenly-spaced frequency bins.
- * Each bin contains ~5.33 FFT outputs. The function sums the squared magnitudes
- * in each bin, applies the gain factor to the squared magnitude, and converts 
- * to log-scale colormap index. Gain is applied before logarithm for correct 
- * signal processing order.
+ * These were alternate implementations that used floating-point logf() scaling.
+ * The actual waterfall rendering uses the accumulation method with integer log
+ * lookup table (waterfall_accm_get_bar), which is more efficient.
  * 
- * @param spec pointer to spectrogram context (fft_magnitude must be populated)
- * @param waterfall_indices output array to store 24 colormap indices (0-15)
- * @param gain_squared microphone gain squared, scaled by 10000 for integer math
- * @return 0 on success, -1 on error
+ * See waterfall_accm_get_bar() below for the active implementation.
  */
-int spectrogram_compute_waterfall_bins(const spectrogram_t *spec, uint16_t *waterfall_indices, uint32_t gain_squared)
-{
-    if (spec == NULL || waterfall_indices == NULL) {
-        return -1;
-    }
-    
-    #define WATERFALL_BINS 24
-    
-    /* FFT has 128 magnitude values (SPECTROGRAM_FFT_SIZE / 2) */
-    /* Divide into 24 bins: 128 / 24 = 5.33 values per bin */
-    const uint32_t fft_bins = SPECTROGRAM_FFT_SIZE / 2;  /* 128 */
-    const uint32_t bins_per_group = fft_bins / WATERFALL_BINS;  /* 5 */
-    const uint32_t remainder = fft_bins % WATERFALL_BINS;  /* 8 */
-    
-    uint32_t fft_idx = 0;
-    
-    for (uint32_t w_bin = 0; w_bin < WATERFALL_BINS; w_bin++) {
-        /* Determine how many FFT bins belong to this waterfall bin */
-        uint32_t group_size = bins_per_group;
-        if (w_bin < remainder) {
-            group_size += 1;  /* Distribute remainder across first bins */
-        }
-        
-        /* Sum squared magnitudes in this group */
-        uint64_t sum_sq = 0;
-        for (uint32_t i = 0; i < group_size; i++) {
-            if (fft_idx >= fft_bins) break;
-            
-            q15_t mag = spec->fft_magnitude[fft_idx];
-            int32_t mag_i32 = mag;
-            sum_sq += mag_i32 * mag_i32;
-            fft_idx++;
-        }
-        
-        /* Average by dividing by group size */
-        uint32_t avg_sq = sum_sq / group_size;
-        
-        /* Apply gain directly to squared magnitude (avoid expensive sqrt) */
-        /* gain_squared is in units of 0.0001, so scale appropriately */
-        uint64_t scaled = (uint64_t)avg_sq * gain_squared / 10000;
-        if (scaled > UINT32_MAX) scaled = UINT32_MAX;
-        
-        /* Convert to float for log scaling */
-        float32_t mag_float = (float32_t)scaled / (32767.0f * 32767.0f);
-        mag_float = mag_float * SPECTROGRAM_MAG_MAX * SPECTROGRAM_MAG_MAX;
-        
-        /* Logarithmic scaling with clamping */
-        if (mag_float < 1.0f) {
-            mag_float = 1.0f;
-        }
-        
-        float32_t log_mag = logf(mag_float);
-        float32_t min_log = logf(1.0f);
-        float32_t max_log = logf(SPECTROGRAM_MAG_MAX * SPECTROGRAM_MAG_MAX);
-        float32_t normalized = (log_mag - min_log) / (max_log - min_log);
-        
-        if (normalized < 0.0f) normalized = 0.0f;
-        if (normalized > 1.0f) normalized = 1.0f;
-        
-        /* Convert to colormap index (0-15) */
-        uint16_t colormap_idx = (uint16_t)(normalized * 15.0f + 0.5f);
-        if (colormap_idx > 15) colormap_idx = 15;
-        
-        waterfall_indices[w_bin] = colormap_idx;
-    }
-    
-    return 0;
-}
-
-/**
- * Compute waterfall bins with automatic gain application
- * 
- * Convenience wrapper for spectrogram_compute_waterfall_bins() that
- * automatically retrieves the waterfall gain from the display control
- * and applies it to the FFT magnitude spectrum.
- * 
- * This is the preferred function to use when generating waterfall display
- * data from the audio pipeline. It ensures the gain setting is properly
- * applied between FFT computation and colormap indexing.
- * 
- * Flow: FFT magnitude → squared → gain applied → log magnitude → colormap index
- * 
- * @param spec pointer to spectrogram context (must have fft_magnitude populated)
- * @param waterfall_indices output array to store 24 colormap indices (0-15)
- * @return 0 on success, -1 on error
- */
-int spectrogram_compute_waterfall_bins_with_gain(const spectrogram_t *spec, uint16_t *waterfall_indices)
-{
-    if (spec == NULL || waterfall_indices == NULL) {
-        return -1;
-    }
-    
-    /* Get current waterfall gain value (stored in units of 0.0001 * gain^2) */
-    uint32_t gain_value = getWaterfallGain();
-    
-    /* Call the main computation function with the gain */
-    return spectrogram_compute_waterfall_bins(spec, waterfall_indices, gain_value);
-}
 
 /* ============== Waterfall Accumulation Algorithm ============== */
 

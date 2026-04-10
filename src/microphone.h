@@ -182,16 +182,28 @@ extern AudioBuffers_t g_audioBuffers;
  */
 extern SemaphoreHandle_t g_audioReadySemaphore;
 
-/**
- * Message queue for audio buffer notifications to UDP task
- * Contains buffer metadata and pointer to audio data
+/** * Binary semaphore for UDP task event-driven signaling
+ * Posted by microphone when new audio buffer ready for UDP
  */
-extern QueueHandle_t g_audioQueueUDP;
+extern SemaphoreHandle_t g_audioSemaphoreUDP;
 
 /**
- * Message queue for audio buffer notifications to Waterfall task
- * Contains buffer metadata and pointer to audio data
+ * Current buffer data for UDP task (updated by microphone, read by UDP)
  */
+extern int16_t *g_current_udp_buffer;
+extern uint32_t g_current_udp_sample_count;
+extern uint32_t g_current_udp_sequence;
+
+/**
+ * UDP task ready flag - set when UDP task is waiting on semaphore for next frame
+ * Microphone checks this before giving semaphore (prevents race condition)
+ */
+/**
+ * Message queues for audio buffer distribution
+ * Each consumer (UDP, Waterfall) gets independent queue for independent flow control
+ * FreeRTOS queue internals handle all memory barriers (no explicit fences needed)
+ */
+extern QueueHandle_t g_audioQueueUDP;
 extern QueueHandle_t g_audioQueueWaterfall;
 
 typedef struct {
@@ -226,14 +238,6 @@ uint8_t get_audio_ready(void);
  * Clear the audio ready status after consuming buffer
  */
 void clear_audio_ready(void);
-
-/**
- * Get the current UDP audio queue depth for diagnostics
- * Returns the number of pending audio buffers in the UDP processing queue
- * 
- * @return Number of messages in queue (0-4)
- */
-UBaseType_t microphone_get_udp_queue_depth(void);
 
 /**
  * Microphone task - runs PDM to PCM conversion and DMA transfer
