@@ -522,7 +522,7 @@ int waterfall_accm_add_fft(waterfall_accm_t *accm, const q15_t *fft_output, uint
     uint32_t fft_idx = 0;
     uint32_t max_mag_sq = 0;  /* Track max power across all bins */
     
-    for (uint32_t bin = 0; bin < num_outputs && fft_idx < 2 * num_outputs; bin++) {
+    for (uint32_t bin = 0; bin < num_outputs && fft_idx < WATERFALL_FFT_BINS; bin++) {
         /* Extract real and imaginary parts */
         int32_t real = (int32_t)fft_output[fft_idx++];
         int32_t imag = (fft_idx < 2 * num_outputs) ? (int32_t)fft_output[fft_idx++] : 0;
