@@ -59,7 +59,8 @@ static uint32_t g_udp_last_report_time = 0;   /* Last stats report time */
 static uint32_t g_udp_packets_received = 0;   /* Track incoming registration packets */
 
 /* Send audio frame to all active clients via UDP
- * Uses PBUF_POOL with memcpy - allocate per-frame but from static pool
+ * Optimized: Uses single memcpy to static buffer + PBUF_ROM reference (no 2nd copy)
+ * Static buffer persists through lwIP cloning, safe for all clients
  */
 static void udp_audio_send_frame(int16_t *buffer) {
     if (buffer == NULL) {
@@ -67,23 +68,21 @@ static void udp_audio_send_frame(int16_t *buffer) {
         return;
     }
     
-    /* Copy audio data to static buffer */
+    /* Copy audio data to static buffer (input buffer is transient, will be reused by microphone) */
     uint32_t frame_bytes = AUDIO_BUFFER_SIZE * sizeof(int16_t);
     memcpy(g_udp_send_buffer, buffer, frame_bytes);
     
-    /* Create pbuf from static pool, copy data into it */
-    struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, frame_bytes, PBUF_POOL);
+    /* Create pbuf reference to static buffer (PBUF_ROM - read-only, no copy needed) */
+    /* lwIP clones internally during udp_sendto(), so static buffer is safe */
+    struct pbuf *p = pbuf_alloc_reference((u8_t *)g_udp_send_buffer, frame_bytes, PBUF_ROM);
     if (p == NULL) {
         /* Out of memory - skip this frame */
         g_audio_samples_dropped += AUDIO_BUFFER_SIZE;
         if (g_micDebug >= 2) {
-            printf("[UDP] ERROR: pbuf_alloc FAILED\n");
+            printf("[UDP] ERROR: pbuf_alloc_reference FAILED\n");
         }
         return;
     }
-    
-    /* Copy to pbuf payload (pbuf_pool can be freed safely) */
-    memcpy(p->payload, g_udp_send_buffer, frame_bytes);
     
     /* Send to all active UDP clients */
     for (int i = 0; i < MAX_CLIENTS; i++) {
