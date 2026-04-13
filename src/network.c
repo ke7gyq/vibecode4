@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>  /* For malloc/free */
 
 // lwIP configuration must be included before any other lwIP headers
 #include "lwipcfg.h"
@@ -10,6 +11,7 @@
 #include "hardware/flash.h"
 #include "FreeRTOS.h"
 #include "task.h"
+#include "infrastructure.h"  /* For WiFi credentials and gain constants */
 #include "network.h"
 #include "microphone.h"  /* For g_micDebug flag */
 #include "tcp_server.h"  /* For udp_server_start() on WiFi connect */
@@ -37,8 +39,6 @@ typedef enum {
 } wifi_state_t;
 
 static wifi_state_t g_wifi_state = WIFI_STATE_IDLE;
-static char g_target_ssid[33] = {0};
-static char g_target_password[64] = {0};
 static uint32_t g_connection_start_time = 0;
 static const uint32_t WIFI_CONNECT_TIMEOUT_MS = 30000;  // 30 second timeout (lwIP DHCP takes time)
 static bool g_dhcp_started = false;
@@ -52,18 +52,41 @@ static const uint32_t UDP_START_DELAY_MS = 2000;  /* 2-second delay for netif in
 #define WIFI_CREDENTIALS_VERSION 1
 
 /* Credentials structure stored in flash */
+/**
+ * Unified Persistent Memory Structure
+ * All persistent configuration in single 4KB flash block
+ * Read-modify-write pattern ensures no data loss
+ */
 typedef struct {
-    uint32_t magic;              /* Magic number for validation */
+    /* Header */
+    uint32_t magic;              /* Magic: 0x50455253 ('PERS') */
     uint8_t version;             /* Structure version */
     uint8_t reserved[3];         /* Padding */
-    char ssid[33];               /* SSID (max 32 chars + null) */
-    char password[64];           /* Password (max 63 chars + null) */
-    uint32_t crc32;              /* CRC32 checksum */
-} wifi_credentials_t;
+    
+    /* WAN Credentials */
+    char wan_ssid[33];           /* WiFi SSID (max 32 chars + null) */
+    char wan_password[64];       /* WiFi password (max 63 chars + null) */
+    
+    /* Waterfall Configuration */
+    uint32_t waterfall_gain;     /* Linear gain × GAIN_NORMALIZATION */
+    uint32_t waterfall_gain_squared;  /* Precomputed squared gain */
+    uint16_t waterfall_color;    /* Color palette index */
+    uint8_t waterfall_mode;      /* 0=off, 1=TEST, 2=LIVE_AUDIO */
+    uint8_t _mode_reserved;      /* Padding */
+    
+    /* Validation */
+    uint32_t crc32;              /* CRC32 checksum of data before this field */
+    
+    /* Reserved for future expansion - pad to exactly 4096 bytes */
+    /* Current total: 4+1+3+33+64+4+4+2+1+1+4 = 121 bytes, need 3975 bytes padding */
+    uint8_t _padding[3975];
+} __attribute__((packed)) persistent_memory_t;
 
-/* Flash storage: use last 4KB of flash for credentials (before end of storage) */
-/* RP2350 has 8MB or 16MB flash depending on variant */
-#define WIFI_CREDENTIALS_OFFSET (PICO_FLASH_SIZE_BYTES - 4096)
+#define PERSISTENT_MEMORY_MAGIC 0x50455253   /* 'PERS' */
+#define PERSISTENT_MEMORY_VERSION 1
+#define PERSISTENT_MEMORY_OFFSET (PICO_FLASH_SIZE_BYTES - 4096)
+
+_Static_assert(sizeof(persistent_memory_t) == 4096, "persistent_memory_t must be exactly 4096 bytes");
 
 /**
  * Simple CRC32 calculation
@@ -77,6 +100,53 @@ static uint32_t crc32_calc(const uint8_t *data, size_t len) {
         }
     }
     return crc ^ 0xFFFFFFFF;
+}
+
+/**
+ * Get persistent memory from flash (XIP region)
+ */
+static const persistent_memory_t* _get_persistent_from_flash(void) {
+    return (const persistent_memory_t *)(XIP_BASE + PERSISTENT_MEMORY_OFFSET);
+}
+
+/**
+ * Write persistent memory to flash using read-modify-write pattern
+ * Allocates 4KB buffer, updates it, erases sector, writes back
+ */
+static int _flash_write_persistent(const persistent_memory_t *data) {
+    /* Allocate 4KB buffer on heap */
+    persistent_memory_t *buffer = (persistent_memory_t *)malloc(sizeof(persistent_memory_t));
+    if (buffer == NULL) {
+        printf("[FLASH] ERROR: Failed to allocate 4KB buffer\n");
+        return -1;
+    }
+    
+    /* Read current flash contents into buffer */
+    const persistent_memory_t *flash_ptr = _get_persistent_from_flash();
+    memcpy(buffer, (const void *)flash_ptr, sizeof(persistent_memory_t));
+    
+    /* Update fields from provided data (copy data portion only, not padding/CRC) */
+    if (data != NULL) {
+        memcpy(&buffer->wan_ssid, &data->wan_ssid, 
+               offsetof(persistent_memory_t, crc32) - offsetof(persistent_memory_t, wan_ssid));
+    }
+    
+    /* Recalculate CRC over data before CRC field */
+    buffer->crc32 = crc32_calc((uint8_t *)buffer, offsetof(persistent_memory_t, crc32));
+    
+    /* Write to flash with critical section protection */
+    taskENTER_CRITICAL();
+    {
+        flash_range_erase(PERSISTENT_MEMORY_OFFSET, 4096);
+        flash_range_program(PERSISTENT_MEMORY_OFFSET, (uint8_t *)buffer, sizeof(persistent_memory_t));
+    }
+    taskEXIT_CRITICAL();
+    
+    /* Free allocated buffer */
+    free(buffer);
+    
+    printf("[FLASH] Persistent memory written successfully\n");
+    return 0;
 }
 
 /**
@@ -208,20 +278,20 @@ int network_connect(const char *ssid, const char *password) {
     
     wifi_init();  // Ensure WiFi hardware is initialized
     
-    strncpy(g_target_ssid, ssid, sizeof(g_target_ssid) - 1);
-    g_target_ssid[sizeof(g_target_ssid) - 1] = '\0';
+    strncpy(g_wifi_ssid, ssid, sizeof(g_wifi_ssid) - 1);
+    g_wifi_ssid[sizeof(g_wifi_ssid) - 1] = '\0';
     
-    strncpy(g_target_password, password, sizeof(g_target_password) - 1);
-    g_target_password[sizeof(g_target_password) - 1] = '\0';
+    strncpy(g_wifi_password, password, sizeof(g_wifi_password) - 1);
+    g_wifi_password[sizeof(g_wifi_password) - 1] = '\0';
     
-    printf("Attempting WiFi connection to: %s\n", g_target_ssid);
+    printf("Attempting WiFi connection to: %s\n", g_wifi_ssid);
     g_wifi_state = WIFI_STATE_CONNECTING;
     g_connection_start_time = to_ms_since_boot(get_absolute_time());
     g_dhcp_started = false;
     g_udp_auto_started = false;  /* Reset UDP flag for this connection attempt */
     
     // Initiate the connection with password
-    int result = cyw43_arch_wifi_connect_async(g_target_ssid, g_target_password, CYW43_AUTH_WPA2_AES_PSK);
+    int result = cyw43_arch_wifi_connect_async(g_wifi_ssid, g_wifi_password, CYW43_AUTH_WPA2_AES_PSK);
     
     if (result == 0) {
         printf("Connection initiated. Polling for status and DHCP...\n");
@@ -523,32 +593,40 @@ int network_credentials_save(const char *ssid, const char *password) {
         return -1;
     }
     
-    wifi_credentials_t creds;
-    memset(&creds, 0xFF, sizeof(creds));  /* Flash erase pattern */
+    /* Allocate 4KB buffer for read-modify-write */
+    persistent_memory_t *buffer = (persistent_memory_t *)malloc(sizeof(persistent_memory_t));
+    if (buffer == NULL) {
+        printf("ERROR: Failed to allocate memory for persistent memory\n");
+        return -1;
+    }
     
-    /* Fill structure */
-    creds.magic = WIFI_CREDENTIALS_MAGIC;
-    creds.version = WIFI_CREDENTIALS_VERSION;
-    strncpy(creds.ssid, ssid, 32);
-    creds.ssid[32] = '\0';
-    strncpy(creds.password, password, 63);
-    creds.password[63] = '\0';
+    /* Read current contents from flash */
+    const persistent_memory_t *flash_ptr = _get_persistent_from_flash();
+    memcpy(buffer, (const void *)flash_ptr, sizeof(persistent_memory_t));
     
-    /* Calculate CRC over data before CRC field */
-    creds.crc32 = crc32_calc((uint8_t*)&creds, offsetof(wifi_credentials_t, crc32));
+    /* Ensure header is initialized */
+    buffer->magic = PERSISTENT_MEMORY_MAGIC;
+    buffer->version = PERSISTENT_MEMORY_VERSION;
     
-    /* Write to flash using FreeRTOS critical section */
-    printf("[FLASH] Saving WiFi credentials to flash at offset 0x%x\n", WIFI_CREDENTIALS_OFFSET);
+    /* Update WAN credentials */
+    memset(buffer->wan_ssid, 0, sizeof(buffer->wan_ssid));
+    memset(buffer->wan_password, 0, sizeof(buffer->wan_password));
+    strncpy(buffer->wan_ssid, ssid, 32);
+    strncpy(buffer->wan_password, password, 63);
     
-    /* Use FreeRTOS critical section instead of raw interrupt disable */
+    /* Calculate new CRC */
+    buffer->crc32 = crc32_calc((uint8_t *)buffer, offsetof(persistent_memory_t, crc32));
+    
+    /* Write to flash */
     taskENTER_CRITICAL();
     {
-        flash_range_erase(WIFI_CREDENTIALS_OFFSET, 4096);  /* Erase 4KB sector */
-        flash_range_program(WIFI_CREDENTIALS_OFFSET, (uint8_t*)&creds, sizeof(creds));
+        flash_range_erase(PERSISTENT_MEMORY_OFFSET, 4096);
+        flash_range_program(PERSISTENT_MEMORY_OFFSET, (uint8_t *)buffer, sizeof(persistent_memory_t));
     }
     taskEXIT_CRITICAL();
     
-    printf("[FLASH] WiFi credentials saved successfully\n");
+    free(buffer);
+    printf("[FLASH] WiFi credentials saved successfully (SSID='%s')\n", ssid);
     return 0;
 }
 
@@ -558,57 +636,201 @@ int network_credentials_load(char *ssid, char *password) {
         return 0;
     }
     
-    /* Read from flash (XIP region, direct memory access) */
-    const wifi_credentials_t *creds = (const wifi_credentials_t *)(XIP_BASE + WIFI_CREDENTIALS_OFFSET);
+    const persistent_memory_t *mem = _get_persistent_from_flash();
     
-    /* Validate magic and version */
-    if (creds->magic != WIFI_CREDENTIALS_MAGIC) {
-        if (creds->magic != 0xFFFFFFFF) {  /* Not erased, but wrong magic */
-            printf("[FLASH] Invalid credentials magic: 0x%x (expected 0x%x)\n", 
-                   creds->magic, WIFI_CREDENTIALS_MAGIC);
+    /* Validate persistent memory */
+    if (mem->magic != PERSISTENT_MEMORY_MAGIC) {
+        if (mem->magic != 0xFFFFFFFF) {
+            printf("[FLASH] Invalid persistent memory magic: 0x%x\n", mem->magic);
         }
         return 0;  /* Not found */
     }
     
-    if (creds->version != WIFI_CREDENTIALS_VERSION) {
-        printf("[FLASH] Unsupported credential version: %u\n", creds->version);
+    if (mem->version != PERSISTENT_MEMORY_VERSION) {
+        printf("[FLASH] Unsupported persistent memory version: %u\n", mem->version);
         return 0;
     }
     
     /* Validate CRC */
-    uint32_t expected_crc = crc32_calc((uint8_t*)creds, offsetof(wifi_credentials_t, crc32));
-    if (expected_crc != creds->crc32) {
-        printf("[FLASH] Credentials CRC mismatch: got 0x%x, expected 0x%x\n", 
-               creds->crc32, expected_crc);
-        return 0;  /* Corrupted */
+    uint32_t expected_crc = crc32_calc((uint8_t *)mem, offsetof(persistent_memory_t, crc32));
+    if (expected_crc != mem->crc32) {
+        printf("[FLASH] Persistent memory CRC mismatch\n");
+        return 0;
+    }
+    
+    /* Check if SSID is actually set (not all zeros) */
+    if (mem->wan_ssid[0] == '\0' || mem->wan_ssid[0] == 0xFF) {
+        return 0;  /* No credentials saved */
     }
     
     /* Extract credentials */
-    strncpy(ssid, creds->ssid, 32);
+    strncpy(ssid, mem->wan_ssid, 32);
     ssid[32] = '\0';
-    strncpy(password, creds->password, 63);
+    strncpy(password, mem->wan_password, 63);
     password[63] = '\0';
     
     printf("[FLASH] WiFi credentials loaded: SSID='%s'\n", ssid);
-    return 1;  /* Success */
+    return 1;
 }
 
 int network_credentials_clear(void) {
     printf("[FLASH] Clearing WiFi credentials from flash\n");
     
-    /* Use FreeRTOS critical section instead of raw interrupt disable */
+    /* Allocate buffer and read-modify to clear just WAN fields */
+    persistent_memory_t *buffer = (persistent_memory_t *)malloc(sizeof(persistent_memory_t));
+    if (buffer == NULL) {
+        return -1;
+    }
+    
+    const persistent_memory_t *flash_ptr = _get_persistent_from_flash();
+    memcpy(buffer, (const void *)flash_ptr, sizeof(persistent_memory_t));
+    
+    /* Clear WAN credentials */
+    memset(buffer->wan_ssid, 0, sizeof(buffer->wan_ssid));
+    memset(buffer->wan_password, 0, sizeof(buffer->wan_password));
+    
+    buffer->crc32 = crc32_calc((uint8_t *)buffer, offsetof(persistent_memory_t, crc32));
+    
     taskENTER_CRITICAL();
     {
-        flash_range_erase(WIFI_CREDENTIALS_OFFSET, 4096);  /* Erase 4KB sector */
+        flash_range_erase(PERSISTENT_MEMORY_OFFSET, 4096);
+        flash_range_program(PERSISTENT_MEMORY_OFFSET, (uint8_t *)buffer, sizeof(persistent_memory_t));
     }
     taskEXIT_CRITICAL();
     
+    free(buffer);
     printf("[FLASH] WiFi credentials cleared\n");
     return 0;
 }
 
 int network_credentials_exist(void) {
-    const wifi_credentials_t *creds = (const wifi_credentials_t *)(XIP_BASE + WIFI_CREDENTIALS_OFFSET);
+    const persistent_memory_t *mem = _get_persistent_from_flash();
     
-    return (creds->magic == WIFI_CREDENTIALS_MAGIC && creds->version == WIFI_CREDENTIALS_VERSION);
+    if (mem->magic != PERSISTENT_MEMORY_MAGIC || mem->version != PERSISTENT_MEMORY_VERSION) {
+        return 0;
+    }
+    
+    /* Check if SSID is set */
+    return (mem->wan_ssid[0] != '\0' && mem->wan_ssid[0] != 0xFF);
+}
+
+/* ==================== Waterfall Configuration Flash Storage ==================== */
+
+/**
+ * Save waterfall gain configuration to flash
+ */
+int waterfall_config_save_gain(uint32_t waterfall_gain) {
+    persistent_memory_t *buffer = (persistent_memory_t *)malloc(sizeof(persistent_memory_t));
+    if (buffer == NULL) {
+        printf("[FLASH] ERROR: Failed to allocate buffer\n");
+        return -1;
+    }
+    
+    const persistent_memory_t *flash_ptr = _get_persistent_from_flash();
+    memcpy(buffer, (const void *)flash_ptr, sizeof(persistent_memory_t));
+    
+    /* Ensure header is initialized */
+    buffer->magic = PERSISTENT_MEMORY_MAGIC;
+    buffer->version = PERSISTENT_MEMORY_VERSION;
+    
+    /* Update waterfall gain */
+    buffer->waterfall_gain = waterfall_gain;
+    buffer->waterfall_gain_squared = (uint32_t)(((uint64_t)waterfall_gain * waterfall_gain) / 100);
+    
+    buffer->crc32 = crc32_calc((uint8_t *)buffer, offsetof(persistent_memory_t, crc32));
+    
+    taskENTER_CRITICAL();
+    {
+        flash_range_erase(PERSISTENT_MEMORY_OFFSET, 4096);
+        flash_range_program(PERSISTENT_MEMORY_OFFSET, (uint8_t *)buffer, sizeof(persistent_memory_t));
+    }
+    taskEXIT_CRITICAL();
+    
+    free(buffer);
+    printf("[FLASH] Waterfall gain saved: %lu\n", waterfall_gain);
+    return 0;
+}
+
+/**
+ * Load waterfall configuration from flash
+ */
+int waterfall_config_load(uint32_t *waterfall_gain) {
+    if (waterfall_gain == NULL) {
+        return 0;
+    }
+    
+    const persistent_memory_t *mem = _get_persistent_from_flash();
+    
+    /* Validate */
+    if (mem->magic != PERSISTENT_MEMORY_MAGIC || mem->version != PERSISTENT_MEMORY_VERSION) {
+        return 0;
+    }
+    
+    uint32_t expected_crc = crc32_calc((uint8_t *)mem, offsetof(persistent_memory_t, crc32));
+    if (expected_crc != mem->crc32) {
+        return 0;
+    }
+    
+    *waterfall_gain = mem->waterfall_gain;
+    printf("[FLASH] Waterfall gain loaded: %lu\n", mem->waterfall_gain);
+    return 1;
+}
+
+/**
+ * Save waterfall mode/color configuration
+ */
+int waterfall_config_save_display(uint16_t waterfall_color, uint8_t waterfall_mode) {
+    persistent_memory_t *buffer = (persistent_memory_t *)malloc(sizeof(persistent_memory_t));
+    if (buffer == NULL) {
+        return -1;
+    }
+    
+    const persistent_memory_t *flash_ptr = _get_persistent_from_flash();
+    memcpy(buffer, (const void *)flash_ptr, sizeof(persistent_memory_t));
+    
+    /* Ensure header is initialized */
+    buffer->magic = PERSISTENT_MEMORY_MAGIC;
+    buffer->version = PERSISTENT_MEMORY_VERSION;
+    
+    /* Update display settings */
+    buffer->waterfall_color = waterfall_color;
+    buffer->waterfall_mode = waterfall_mode;
+    
+    buffer->crc32 = crc32_calc((uint8_t *)buffer, offsetof(persistent_memory_t, crc32));
+    
+    taskENTER_CRITICAL();
+    {
+        flash_range_erase(PERSISTENT_MEMORY_OFFSET, 4096);
+        flash_range_program(PERSISTENT_MEMORY_OFFSET, (uint8_t *)buffer, sizeof(persistent_memory_t));
+    }
+    taskEXIT_CRITICAL();
+    
+    free(buffer);
+    printf("[FLASH] Waterfall display config saved (color=%u, mode=%u)\n", waterfall_color, waterfall_mode);
+    return 0;
+}
+
+/**
+ * Load waterfall display configuration
+ */
+int waterfall_config_load_display(uint16_t *waterfall_color, uint8_t *waterfall_mode) {
+    if (waterfall_color == NULL || waterfall_mode == NULL) {
+        return 0;
+    }
+    
+    const persistent_memory_t *mem = _get_persistent_from_flash();
+    
+    /* Validate */
+    if (mem->magic != PERSISTENT_MEMORY_MAGIC || mem->version != PERSISTENT_MEMORY_VERSION) {
+        return 0;
+    }
+    
+    uint32_t expected_crc = crc32_calc((uint8_t *)mem, offsetof(persistent_memory_t, crc32));
+    if (expected_crc != mem->crc32) {
+        return 0;
+    }
+    
+    *waterfall_color = mem->waterfall_color;
+    *waterfall_mode = mem->waterfall_mode;
+    return 1;
 }

@@ -74,9 +74,25 @@ def main():
                 data, (src_ip, src_port) = sock.recvfrom(65536)
                 timeout_count = 0  # Reset timeout counter on successful receive
                 
-                if len(data) >= frame_size_bytes:
-                    # Extract audio samples (16-bit signed, little-endian)
-                    samples = struct.unpack(f'<{args.frame_size}h', data[:frame_size_bytes])
+                # **NEW**: Parse 4-byte frame sequence header (added by RP2350)
+                # Frame format: [seq:4 bytes (uint32 LE)][audio:1056 bytes]
+                if len(data) >= 4 + frame_size_bytes:
+                    # Extract sequence number (first 4 bytes, little-endian)
+                    seq_num = struct.unpack('<I', data[0:4])[0]
+                    
+                    # Extract audio samples from offset 4 onwards
+                    audio_data = data[4:4+frame_size_bytes]
+                    samples = struct.unpack(f'<{args.frame_size}h', audio_data)
+                    
+                    # Detect lost frames by checking sequence number gaps
+                    if last_seq is not None:
+                        gap = seq_num - last_seq - 1
+                        if gap > 0:
+                            lost_frames += gap
+                            if gap <= 10:  # Only warn about small gaps (avoid spam)
+                                print(f"[WARNING] Lost {gap} frames (seq {last_seq} → {seq_num})")
+                    
+                    last_seq = seq_num
                     
                     # Write to WAV file
                     wav_file.writeframes(struct.pack(f'<{args.frame_size}h', *samples))

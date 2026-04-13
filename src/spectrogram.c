@@ -11,6 +11,7 @@
 #include <math.h>
 #include <arm_math.h>
 #include "spectrogram.h"
+#include "infrastructure.h"  /* For gain management */
 
 /* ============== Waterfall Gain Control ============== */
 
@@ -20,40 +21,6 @@
  * Squared gain is precomputed and cached for efficiency: (gain / GAIN_NORMALIZATION)²
  * Squared gain is what's actually applied during waterfall bar generation
  */
-static uint32_t g_waterfallGain = 300;           /* Linear gain value (user input) - reduced for accumulated power ~1600 */
-
-/* Helper function to compute squared gain from linear gain value */
-static uint32_t compute_gain_squared(uint32_t gain) {
-    if (gain == 0) return 0;
-    uint64_t gain_sq = (uint64_t)gain * gain;
-    uint64_t divisor = (uint64_t)GAIN_NORMALIZATION * GAIN_NORMALIZATION;
-    uint64_t result = gain_sq / divisor;
-    return (result > UINT32_MAX) ? UINT32_MAX : (uint32_t)result;
-}
-
-/* Initialize squared gain at compile time: (300 / 10)² = 30² = 900 */
-static uint32_t g_waterfallGain_squared = (uint32_t)((300ULL * 300ULL) / (10ULL * 10ULL));  /* 900 */
-
-/**
- * Get current waterfall gain (squared, precomputed)
- * This is the value to apply during bar generation
- * @return Squared gain = (user_gain / GAIN_NORMALIZATION)²
- */
-uint32_t getWaterfallGain(void) {
-    return g_waterfallGain_squared;
-}
-
-/**
- * Set waterfall gain value
- * Computes squared gain once to avoid repeated squaring during bar generation
- * @param gain Linear gain value * GAIN_NORMALIZATION (e.g., 10 = 1.0x, 20 = 2.0x)
- */
-void setWaterfallGain(uint32_t gain) {
-    if (gain > 0) {
-        g_waterfallGain = gain;
-        g_waterfallGain_squared = compute_gain_squared(gain);
-    }
-}
 
 /* ============== Waterfall Bandwidth Control ============== */
 

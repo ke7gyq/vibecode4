@@ -1,0 +1,67 @@
+
+
+How to read / wrtie to a flash block:
+
+struct PersistantMemory {
+	struct WanCredentials {
+		char [33 ] ssid ,              // Use whatever length needed for strings.
+		char [33 ] password, 
+	} wan
+	struct waterfallGain {
+		uint32_t  gain,			// Use whatever type you are currently using
+		uint32_t  gainSquared
+	} gain
+
+        // Other persistant variables.
+
+};
+
+#define FLASH_SIZE 4096
+#define PERSISTANT_AREA FLASH_END - FLASH_SIZE
+
+
+// Setter for cerdentials
+setWan ( char * ssid, password ) 
+	struct (PersistantMemory *) ramMem = malloc ( FLASH_SIZE) ;
+	memcpy ( ramMem->wan.ssid, ssid);
+	memcpy ( ramMem->wan.password, password);
+	flash_write ( PERSISTANT_AREA, ramMem, FLASH_SIZE );
+	free ( ramMem)
+}
+
+getWan () {
+	struct (PersistantMemory *) p = PERSISTANT_AREA FLASH_END - FLASH_SIZE; 
+do this:
+// g_* are globals.
+	g_ssid = p->wan.ssid;
+	g_password = p->wan.password;
+or this:
+	return &p->wan;
+}	
+	
+// Setter for gain 
+setGain ( gain )
+        struct (PersistantMemory *) ramMem = malloc ( FLASH_SIZE) ;
+        ramMem->gain.gain = gain;
+        ramMem->gain.gainSquared = gain*gain;
+        flash_write ( PERSISTANT_AREA, ramMem, FLASH_SIZE );
+        free ( ramMem)
+}
+
+getWan () {
+        struct (PersistantMemory *) p = PERSISTANT_AREA FLASH_END - FLASH_SIZE;
+do this:
+g_* are globals
+        g_ssid = p->wan.ssid;
+        g_password = p->wan.password;
+or this:
+        return &p->gain;
+}
+
+static void flashWrite ( uint8_t* pdest,  uint8_t * psrc, uint16_t size ) {
+	// Write contents of psrc to dest
+}
+
+
+
+

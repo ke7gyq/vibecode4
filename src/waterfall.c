@@ -222,11 +222,33 @@ void waterfall_task(void *parameters) {
         }
         
         /* Process audio samples through spectrogram (FFT + binning) */
+        #if WATERFALL_TEST_MODE
+        /* TEST MODE: Drain buffer by reading it, then generate test pattern */
+        {
+            /* Drain the buffer by computing RMS (validates data is readable) */
+            int32_t sum_sq = 0;
+            int16_t *samples = (int16_t *)msg.buffer_ptr;
+            for (uint32_t i = 0; i < msg.sample_count; i++) {
+                int32_t s = samples[i];
+                sum_sq += (s * s) >> 16;
+            }
+            
+            /* Generate test FFT output: ramp pattern */
+            memset(g_spectrogram.fft_output, 0, sizeof(g_spectrogram.fft_output));
+            for (int i = 0; i < SPECTROGRAM_FFT_SIZE / 2; i++) {
+                int32_t val = (i * 32767) / (SPECTROGRAM_FFT_SIZE / 2);
+                g_spectrogram.fft_output[2*i] = (q15_t)val;      /* real */
+                g_spectrogram.fft_output[2*i + 1] = (q15_t)val;  /* imag */
+            }
+        }
+        #else
+        /* NORMAL MODE: Real FFT processing */
         int spec_result = spectrogram_process_samples(&g_spectrogram, msg.buffer_ptr, msg.sample_count);
         if (spec_result != 0) {
             printf("[Waterfall] Spectrogram processing failed: %d\n", spec_result);
             continue;
         }
+        #endif
         
         frame_count++;
         

@@ -120,6 +120,38 @@ int network_credentials_clear(void);
  */
 int network_credentials_exist(void);
 
+/* ==================== Waterfall Configuration Functions ==================== */
+
+/**
+ * Save waterfall gain configuration to flash
+ * @param waterfall_gain Linear gain × GAIN_NORMALIZATION
+ * @return 0 on success, non-zero on error
+ */
+int waterfall_config_save_gain(uint32_t waterfall_gain);
+
+/**
+ * Load waterfall gain configuration from flash
+ * @param waterfall_gain Pointer to variable to fill with waterfall gain
+ * @return 1 if valid config found, 0 if not found or invalid
+ */
+int waterfall_config_load(uint32_t *waterfall_gain);
+
+/**
+ * Save waterfall display configuration (color and mode) to flash
+ * @param waterfall_color Color palette index (uint16_t)
+ * @param waterfall_mode Display mode (0=off, 1=TEST, 2=LIVE_AUDIO)
+ * @return 0 on success, non-zero on error
+ */
+int waterfall_config_save_display(uint16_t waterfall_color, uint8_t waterfall_mode);
+
+/**
+ * Load waterfall display configuration from flash
+ * @param waterfall_color Pointer to variable to fill with color
+ * @param waterfall_mode Pointer to variable to fill with mode
+ * @return 1 if valid config found, 0 if not found or invalid
+ */
+int waterfall_config_load_display(uint16_t *waterfall_color, uint8_t *waterfall_mode);
+
 #ifdef __cplusplus
 }
 #endif

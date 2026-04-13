@@ -66,19 +66,13 @@ static struct {
 static void pdm_dma_handler(void);
 
 /* ==================== Global Application State ==================== */
-/* Global state */
-volatile uint8_t g_audioReady = 0;
-AudioBuffers_t g_audioBuffers;
-uint8_t g_micDebug = 0;  /* Microphone debug level: 0=OFF, 2+=ON */
-
-/* Binary semaphore signaled when audio buffer is ready */
-SemaphoreHandle_t g_audioReadySemaphore = NULL;
-
-/* Message queues for audio buffer distribution */
-/* Independent queues: UDP task and Waterfall task each maintain own queue depth */
-/* FreeRTOS queue internals handle memory barriers (no explicit fences needed) */
-QueueHandle_t g_audioQueueUDP = NULL;
-QueueHandle_t g_audioQueueWaterfall = NULL;
+/* Global audio state - all defined in infrastructure.c */
+extern volatile uint8_t g_audioReady;
+extern AudioBuffers_t g_audioBuffers;
+extern uint8_t g_micDebug;
+extern SemaphoreHandle_t g_audioReadySemaphore;
+extern QueueHandle_t g_audioQueueUDP;
+extern QueueHandle_t g_audioQueueWaterfall;
 
 /* Message sequence counter - incremented with each buffer ready notification */
 static uint32_t g_audioMessageSequence = 0;

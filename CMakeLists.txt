@@ -94,14 +94,19 @@ add_custom_command(
     WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
 )
 
-# Generate LUT_Params.h from configuration.json
+# Generate LUT_Params.h from configuration.json using C++ tool (native compiler)
+add_custom_command(
+    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/generate_lut"
+    COMMAND /usr/bin/g++ -std=c++17 -O2 -o "${CMAKE_CURRENT_BINARY_DIR}/generate_lut" 
+            "${CMAKE_CURRENT_SOURCE_DIR}/utils/generate_lut.cpp"
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/utils/generate_lut.cpp"
+    COMMENT "Building generate_lut (native compiler)"
+)
+
 add_custom_command(
     OUTPUT "${LUT_PARAMS_H}"
-    COMMAND ${CMAKE_COMMAND} -E echo "Generating LUT_Params.h from configuration.json..."
-    COMMAND python3 "${CMAKE_CURRENT_SOURCE_DIR}/utils/generate_lut.py"
-            "${CONFIGURATION_JSON}"
-            "${LUT_PARAMS_H}"
-    DEPENDS "${CONFIGURATION_JSON}" "${CMAKE_CURRENT_SOURCE_DIR}/utils/generate_lut.py"
+    COMMAND "${CMAKE_CURRENT_BINARY_DIR}/generate_lut" "${CONFIGURATION_JSON}" "${LUT_PARAMS_H}"
+    DEPENDS "${CONFIGURATION_JSON}" "${CMAKE_CURRENT_BINARY_DIR}/generate_lut"
     COMMENT "Generating OpenPDM2PCM LUT lookup table"
     WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
 )
@@ -112,6 +117,8 @@ add_custom_target(generate_config_headers ALL DEPENDS "${CONFIG_CONSTANTS_H}" "$
 # Source files
 set(SOURCES
     src/main.c
+    src/runnable.c
+    src/infrastructure.c
     src/st7789.c
     src/trustzone_stubs.c
     src/parser.c
@@ -155,7 +162,7 @@ set_source_files_properties(
     src/microphone.c
     src/fault_handler.c
     PROPERTIES
-    COMPILE_FLAGS "-O0"
+    COMPILE_FLAGS "-O3 -g"
 )
 
 # spectrogram.c: FFT and waterfall processing - enable aggressive optimization
@@ -164,13 +171,19 @@ set_source_files_properties(
     PROPERTIES
     COMPILE_FLAGS "-O3 -g"
 )
+# udp_audio_server.c: FFT and waterfall processing - enable aggressive optimization
+set_source_files_properties(
+    src/udp_audio_server.c
+    PROPERTIES
+    COMPILE_FLAGS "-O0 -g"
+)
 
 # FFT and audio DSP routines - enable aggressive optimization
 set_source_files_properties(
     src/audio_dsp_example.c
     src/OpenPDMFilter.c
     PROPERTIES
-    COMPILE_FLAGS "-O3"
+    COMPILE_FLAGS "-O3 -g"
 )
 
 
@@ -229,3 +242,47 @@ pico_enable_stdio_uart(vibecode4 1)
 
 # Create map/bin/hex/uf2 file in addition to ELF
 pico_add_extra_outputs(vibecode4)
+
+# =====================================================================
+# Host Tools (analytics and utilities - native compiler)
+# =====================================================================
+
+# analyzePitch - WAV frequency analysis tool (native compiler)
+add_custom_command(
+    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/analyzePitch"
+    COMMAND /usr/bin/g++ -std=c++17 -O2 
+            `pkg-config --cflags sndfile`
+            -o "${CMAKE_CURRENT_BINARY_DIR}/analyzePitch"
+            "${CMAKE_CURRENT_SOURCE_DIR}/utils/analyzePitch.cpp"
+            `pkg-config --libs sndfile`
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/utils/analyzePitch.cpp"
+    COMMENT "Building analyzePitch (native compiler)"
+)
+
+add_custom_target(analyzePitch_tool ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/analyzePitch")
+
+# udp_sequence_analyzer - UDP packet loss analysis tool (native compiler)
+add_custom_command(
+    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/udp_sequence_analyzer"
+    COMMAND /usr/bin/g++ -std=c++17 -O2 
+            -o "${CMAKE_CURRENT_BINARY_DIR}/udp_sequence_analyzer"
+            "${CMAKE_CURRENT_SOURCE_DIR}/utils/udp_sequence_analyzer.cpp"
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/utils/udp_sequence_analyzer.cpp"
+    COMMENT "Building udp_sequence_analyzer (native compiler)"
+)
+
+add_custom_target(udp_sequence_analyzer_tool ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/udp_sequence_analyzer")
+
+# udp_audio_client - UDP audio receiver with tone analysis (native compiler)
+add_custom_command(
+    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/udp_audio_client"
+    COMMAND /usr/bin/g++ -std=c++17 -O2 -lm
+            -o "${CMAKE_CURRENT_BINARY_DIR}/udp_audio_client"
+            "${CMAKE_CURRENT_SOURCE_DIR}/utils/udp_audio_client.cpp"
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/utils/udp_audio_client.cpp"
+    COMMENT "Building udp_audio_client (native compiler)"
+)
+
+add_custom_target(udp_audio_client_tool ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/udp_audio_client")
+
+

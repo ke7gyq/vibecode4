@@ -9,6 +9,7 @@
 #include "parser.h"
 #include "widgets.h"
 #include "network.h"
+#include "infrastructure.h"  /* For waterfall gain management */
 #include "tcp_server.h"
 #include "waterfall.h"
 #include "microphone.h"
@@ -209,6 +210,8 @@ static uint8_t fnSetTime(char *rest, void *v) {
 static uint8_t fnGainWaterfall(char *rest, void *v) {
     (void)v;
     
+    extern int waterfall_config_save_gain(uint32_t waterfall_gain);
+    
     // Skip whitespace
     while (*rest && isspace(*rest)) {
         rest++;
@@ -216,7 +219,7 @@ static uint8_t fnGainWaterfall(char *rest, void *v) {
     
     // If no arguments, return current value
     if (*rest == '\0') {
-        printf("Current waterfall gain: %lu\n", waterfall_get_gain());
+        printf("Current waterfall gain: %lu (linear)\n", getWaterfallGainLinear());
         return 0;
     }
     
@@ -228,7 +231,15 @@ static uint8_t fnGainWaterfall(char *rest, void *v) {
     }
     
     // Set the gain (setter validates and computes squared gain)
-    waterfall_set_gain(gain_value);
+    setWaterfallGain(gain_value);
+    
+    // Save to flash for persistence across reboots
+    if (waterfall_config_save_gain(gain_value) == 0) {
+        printf("Waterfall gain set to %lu and saved to flash\n", gain_value);
+    } else {
+        printf("Waterfall gain set to %lu (flash save failed)\n", gain_value);
+    }
+    
     return 0;
 }
 

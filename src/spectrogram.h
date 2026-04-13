@@ -14,6 +14,9 @@
 
 /* ============== FFT Configuration ============== */
 
+/* WATERFALL TEST MODE: Disable FFT processing, fill with test data instead */
+#define WATERFALL_TEST_MODE 0   /* Set to 0 to enable real FFT, 1 for test pattern */
+
 /* Sample rate (use value from generated config, fallback to 16000 if not defined) */
 #ifndef SPECTROGRAM_SAMPLE_RATE
 #define SPECTROGRAM_SAMPLE_RATE    16000   /* Hz - fallback default */
@@ -49,11 +52,6 @@
 
 /** Effective sample rate after downsampling for FFT */
 #define WATERFALL_FFT_SAMPLE_RATE  (WATERFALL_SAMPLE_RATE_HZ / AUDIO_DOWNSAMPLE_FACTOR)
-
-/* ============== Waterfall Gain Configuration ============== */
-
-/** Gain normalization factor: user_input / GAIN_NORMALIZATION = linear_gain */
-#define GAIN_NORMALIZATION 10
 
 /* ============== Amplitude to Color Mapping ============== */
 
@@ -174,7 +172,13 @@ void spectrogram_deinit(spectrogram_t *spec);
 uint32_t getWaterfallGain(void);
 
 /**
- * Set waterfall gain value
+ * Get current waterfall gain (linear, user-facing value)
+ * @return Linear gain as set by user (before squaring)
+ */
+uint32_t getWaterfallGainLinear(void);
+
+/**
+ * Set waterfall gain value (calls infrastructure function)
  * @param gain Gain value * GAIN_NORMALIZATION (e.g., 10 = 1.0x, 20 = 2.0x)
  */
 void setWaterfallGain(uint32_t gain);
